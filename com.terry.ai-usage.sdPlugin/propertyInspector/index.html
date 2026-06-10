@@ -151,6 +151,10 @@
       <option value="claude-sonnet">Claude Sonnet</option>
       <option value="cost-30d">30d Cost</option>
       <option value="tokens-today">Today Tokens</option>
+      <option value="agent-sessions">Agent Sessions</option>
+      <option value="codex-sessions">Codex Sessions</option>
+      <option value="claude-sessions">Claude Sessions</option>
+      <option value="needs-input">Needs Input</option>
     </select>
   </div>
 
@@ -162,6 +166,16 @@
   <div class="sdpi-item">
     <div class="sdpi-item-label">Refresh sec</div>
     <input id="refreshSeconds" class="sdpi-item-value" type="number" min="10" max="3600" step="5">
+  </div>
+
+  <div class="sdpi-item">
+    <div class="sdpi-item-label">Session lookback h</div>
+    <input id="sessionLookbackHours" class="sdpi-item-value" type="number" min="1" max="168" step="1">
+  </div>
+
+  <div class="sdpi-item">
+    <div class="sdpi-item-label">Active min</div>
+    <input id="activeSessionMinutes" class="sdpi-item-value" type="number" min="5" max="240" step="5">
   </div>
 
   <div class="sdpi-item">
@@ -228,6 +242,8 @@
       codexBarCostPath: "~/Library/Caches/CodexBar/cost-usage",
       useCodexBarData: true,
       includeClaudeSubagents: true,
+      sessionLookbackHours: 24,
+      activeSessionMinutes: 30,
       maxFiles: 2000
     };
 
@@ -240,6 +256,8 @@
       displayMode: document.getElementById("displayMode"),
       windowDays: document.getElementById("windowDays"),
       refreshSeconds: document.getElementById("refreshSeconds"),
+      sessionLookbackHours: document.getElementById("sessionLookbackHours"),
+      activeSessionMinutes: document.getElementById("activeSessionMinutes"),
       codexPath: document.getElementById("codexPath"),
       claudePath: document.getElementById("claudePath"),
       useCodexBarData: document.getElementById("useCodexBarData"),
@@ -262,6 +280,8 @@
       fields.displayMode.value = merged.displayMode || DEFAULT_SETTINGS.displayMode;
       fields.windowDays.value = merged.windowDays || DEFAULT_SETTINGS.windowDays;
       fields.refreshSeconds.value = merged.refreshSeconds || DEFAULT_SETTINGS.refreshSeconds;
+      fields.sessionLookbackHours.value = merged.sessionLookbackHours || DEFAULT_SETTINGS.sessionLookbackHours;
+      fields.activeSessionMinutes.value = merged.activeSessionMinutes || DEFAULT_SETTINGS.activeSessionMinutes;
       fields.codexPath.value = merged.codexPath || DEFAULT_SETTINGS.codexPath;
       fields.claudePath.value = merged.claudePath || DEFAULT_SETTINGS.claudePath;
       fields.useCodexBarData.checked = merged.useCodexBarData !== false && merged.useCodexBarData !== "false";
@@ -274,6 +294,8 @@
         displayMode: fields.displayMode.value,
         windowDays: Number(fields.windowDays.value || DEFAULT_SETTINGS.windowDays),
         refreshSeconds: Number(fields.refreshSeconds.value || DEFAULT_SETTINGS.refreshSeconds),
+        sessionLookbackHours: Number(fields.sessionLookbackHours.value || DEFAULT_SETTINGS.sessionLookbackHours),
+        activeSessionMinutes: Number(fields.activeSessionMinutes.value || DEFAULT_SETTINGS.activeSessionMinutes),
         codexPath: fields.codexPath.value.trim() || DEFAULT_SETTINGS.codexPath,
         claudePath: fields.claudePath.value.trim() || DEFAULT_SETTINGS.claudePath,
         codexBarHistoryPath: DEFAULT_SETTINGS.codexBarHistoryPath,

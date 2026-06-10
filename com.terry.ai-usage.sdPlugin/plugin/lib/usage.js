@@ -16,7 +16,11 @@ const DISPLAY_MODES = Object.freeze([
   "claude-sonnet",
   "claude-opus",
   "cost-30d",
-  "tokens-today"
+  "tokens-today",
+  "agent-sessions",
+  "codex-sessions",
+  "claude-sessions",
+  "needs-input"
 ]);
 
 const DEFAULT_SETTINGS = Object.freeze({
@@ -29,6 +33,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   codexBarCostPath: "~/Library/Caches/CodexBar/cost-usage",
   useCodexBarData: true,
   includeClaudeSubagents: true,
+  sessionLookbackHours: 24,
+  activeSessionMinutes: 30,
   maxFiles: 2000
 });
 
@@ -49,6 +55,8 @@ function normalizeSettings(settings = {}) {
     windowDays: clampInteger(merged.windowDays, DEFAULT_SETTINGS.windowDays, 1, 90),
     refreshSeconds: clampInteger(merged.refreshSeconds, DEFAULT_SETTINGS.refreshSeconds, 10, 3600),
     maxFiles: clampInteger(merged.maxFiles, DEFAULT_SETTINGS.maxFiles, 50, 10000),
+    sessionLookbackHours: clampInteger(merged.sessionLookbackHours, DEFAULT_SETTINGS.sessionLookbackHours, 1, 168),
+    activeSessionMinutes: clampInteger(merged.activeSessionMinutes, DEFAULT_SETTINGS.activeSessionMinutes, 5, 240),
     includeClaudeSubagents: merged.includeClaudeSubagents !== false && merged.includeClaudeSubagents !== "false",
     useCodexBarData: merged.useCodexBarData !== false && merged.useCodexBarData !== "false",
     displayMode,
@@ -88,6 +96,21 @@ function codexRootsFor(inputPath) {
   } catch {
     // Keep the direct path; scanProvider will report the missing or unreadable root.
   }
+  return uniqueExistingRoots(roots);
+}
+
+function codexSessionRootsFor(inputPath) {
+  const root = resolveHomePath(inputPath);
+  const roots = [];
+  try {
+    const sessions = path.join(root, "sessions");
+    const archived = path.join(root, "archived_sessions");
+    if (fs.existsSync(sessions)) roots.push(sessions);
+    if (fs.existsSync(archived)) roots.push(archived);
+  } catch {
+    // Fall back to the configured path below.
+  }
+  if (!roots.length) roots.push(root);
   return uniqueExistingRoots(roots);
 }
 
@@ -166,6 +189,18 @@ function emptyCost() {
     todayCostNanos: 0,
     thirtyDayCostNanos: 0,
     source: null
+  };
+}
+
+function emptySessionSummary(provider = "total") {
+  return {
+    provider,
+    recent: 0,
+    active: 0,
+    needsInput: 0,
+    running: 0,
+    latestAt: null,
+    items: []
   };
 }
 
@@ -638,6 +673,270 @@ function applyCodexBarData(provider, stats, settings, now) {
   if (cost.source) stats.cost = cost;
 }
 
+function basenameWithoutJsonl(filePath) {
+  return path.basename(filePath).replace(/\.jsonl$/i, "");
+}
+
+function rememberSession(map, key, patch) {
+  const existing = map.get(key) || {
+    id: key,
+    provider: patch.provider,
+    latestAt: null,
+    latestMs: 0,
+    lastRole: null,
+    lastStopReason: null,
+    lastEventType: null,
+    runningSignal: false,
+    cwd: null,
+    source: null,
+    files: 0
+  };
+
+  const next = { ...existing, ...patch };
+  if (patch.latestAt) {
+    const ms = new Date(patch.latestAt).getTime();
+    if (Number.isFinite(ms) && ms >= existing.latestMs) {
+      next.latestMs = ms;
+      next.latestAt = patch.latestAt;
+      next.lastRole = patch.lastRole ?? existing.lastRole;
+      next.lastStopReason = patch.lastStopReason ?? existing.lastStopReason;
+      next.lastEventType = patch.lastEventType ?? existing.lastEventType;
+      next.runningSignal = Boolean(patch.runningSignal);
+    }
+  }
+  next.files = existing.files + (patch.fileSeen ? 1 : 0);
+  next.cwd = patch.cwd || existing.cwd;
+  next.source = patch.source || existing.source;
+  map.set(key, next);
+}
+
+function inspectCodexSessionFile(file, sessions, windowStart, now) {
+  let text;
+  try {
+    text = fs.readFileSync(file.path, "utf8");
+  } catch {
+    return;
+  }
+
+  let sessionId = basenameWithoutJsonl(file.path);
+  let cwd = null;
+  let source = null;
+  let latestAt = null;
+  let lastRole = null;
+  let lastEventType = null;
+  let lastStopReason = null;
+  let runningSignal = false;
+
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const timestamp = recordTimestamp(record, file.mtimeMs);
+    if (!timestamp || timestamp < windowStart || timestamp > new Date(now.getTime() + 5 * 60 * 1000)) continue;
+    const payload = record.payload || {};
+
+    if (record.type === "session_meta" && payload.id) {
+      sessionId = payload.id;
+      cwd = payload.cwd || cwd;
+      source = payload.source || source;
+    }
+    if (record.type === "turn_context") {
+      cwd = payload.cwd || cwd;
+    }
+
+    const currentEventType = payload.type || record.type;
+    const currentRunningSignal = (
+      payload.type === "reasoning"
+      || payload.type === "function_call"
+      || payload.type === "web_search_call"
+      || payload.type === "tool_call"
+      || payload.status === "in_progress"
+      || payload.status === "running"
+    );
+
+    latestAt = timestamp.toISOString();
+    lastEventType = currentEventType;
+    if (payload.role) lastRole = payload.role;
+    if (payload.stop_reason) lastStopReason = payload.stop_reason;
+    runningSignal = currentRunningSignal;
+  }
+
+  if (!latestAt) return;
+  rememberSession(sessions, `codex:${sessionId}`, {
+    provider: "codex",
+    latestAt,
+    lastRole,
+    lastStopReason,
+    lastEventType,
+    runningSignal,
+    cwd,
+    source,
+    fileSeen: true
+  });
+}
+
+function inspectClaudeSessionFile(file, sessions, windowStart, now) {
+  let text;
+  try {
+    text = fs.readFileSync(file.path, "utf8");
+  } catch {
+    return;
+  }
+
+  let sessionId = basenameWithoutJsonl(file.path);
+  let cwd = null;
+  let source = null;
+  let latestAt = null;
+  let lastRole = null;
+  let lastEventType = null;
+  let lastStopReason = null;
+  let runningSignal = false;
+
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let record;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const timestamp = recordTimestamp(record, file.mtimeMs);
+    if (!timestamp || timestamp < windowStart || timestamp > new Date(now.getTime() + 5 * 60 * 1000)) continue;
+    const message = record.message || {};
+
+    sessionId = record.sessionId || sessionId;
+    cwd = record.cwd || cwd;
+    source = record.entrypoint || source;
+    const currentStopReason = message.stop_reason || record.stopReason || lastStopReason;
+
+    latestAt = timestamp.toISOString();
+    lastEventType = record.type;
+    lastRole = message.role || record.type || lastRole;
+    lastStopReason = currentStopReason;
+    runningSignal = record.type === "assistant" && (!currentStopReason || currentStopReason === "tool_use");
+  }
+
+  if (!latestAt) return;
+  rememberSession(sessions, `claude:${sessionId}`, {
+    provider: "claude",
+    latestAt,
+    lastRole,
+    lastStopReason,
+    lastEventType,
+    runningSignal,
+    cwd,
+    source,
+    fileSeen: true
+  });
+}
+
+function summarizeSessionMap(provider, sessionMap, settings, now) {
+  const summary = emptySessionSummary(provider);
+  const activeCutoff = now.getTime() - settings.activeSessionMinutes * 60 * 1000;
+  const items = [...sessionMap.values()]
+    .filter((item) => item.provider === provider)
+    .sort((a, b) => b.latestMs - a.latestMs);
+
+  for (const item of items) {
+    const active = item.latestMs >= activeCutoff;
+    const running = active && item.runningSignal && item.lastStopReason !== "end_turn";
+    const assistantLatest = item.lastRole === "assistant"
+      || item.lastEventType === "agent_message"
+      || item.lastEventType === "message";
+    const needsInput = assistantLatest && !running && (
+      !item.lastStopReason
+      || item.lastStopReason === "end_turn"
+      || item.lastStopReason === "stop"
+      || item.lastStopReason === "complete"
+    );
+
+    summary.recent += 1;
+    if (active) summary.active += 1;
+    if (running) summary.running += 1;
+    if (needsInput) summary.needsInput += 1;
+    if (!summary.latestAt || item.latestMs > new Date(summary.latestAt).getTime()) {
+      summary.latestAt = item.latestAt;
+    }
+
+    if (summary.items.length < 5) {
+      summary.items.push({
+        id: item.id,
+        provider: item.provider,
+        latestAt: item.latestAt,
+        cwd: item.cwd,
+        source: item.source,
+        active,
+        running,
+        needsInput,
+        lastRole: item.lastRole,
+        lastStopReason: item.lastStopReason
+      });
+    }
+  }
+
+  return summary;
+}
+
+function mergeSessionSummaries(codex, claude) {
+  const total = emptySessionSummary("total");
+  for (const summary of [codex, claude]) {
+    total.recent += summary.recent;
+    total.active += summary.active;
+    total.running += summary.running;
+    total.needsInput += summary.needsInput;
+    total.items.push(...summary.items);
+    if (!total.latestAt || (summary.latestAt && new Date(summary.latestAt) > new Date(total.latestAt))) {
+      total.latestAt = summary.latestAt;
+    }
+  }
+  total.items.sort((a, b) => new Date(b.latestAt) - new Date(a.latestAt));
+  total.items = total.items.slice(0, 5);
+  return total;
+}
+
+function collectSessionStatus(settings, now = new Date()) {
+  const windowStart = new Date(now.getTime() - settings.sessionLookbackHours * 60 * 60 * 1000);
+  const sessionMap = new Map();
+  const codexRoots = codexSessionRootsFor(settings.codexPath);
+  const claudeRoots = claudeRootsFor(settings.claudePath);
+
+  for (const root of codexRoots) {
+    if (!root || !fs.existsSync(root)) continue;
+    const walk = walkJsonlFiles(root, {
+      windowStart,
+      maxFiles: settings.maxFiles,
+      includeSubagents: true
+    });
+    for (const file of walk.files) inspectCodexSessionFile(file, sessionMap, windowStart, now);
+  }
+
+  for (const root of claudeRoots) {
+    if (!root || !fs.existsSync(root)) continue;
+    const walk = walkJsonlFiles(root, {
+      windowStart,
+      maxFiles: settings.maxFiles,
+      includeSubagents: settings.includeClaudeSubagents
+    });
+    for (const file of walk.files) inspectClaudeSessionFile(file, sessionMap, windowStart, now);
+  }
+
+  const codex = summarizeSessionMap("codex", sessionMap, settings, now);
+  const claude = summarizeSessionMap("claude", sessionMap, settings, now);
+  return {
+    total: mergeSessionSummaries(codex, claude),
+    codex,
+    claude,
+    lookbackHours: settings.sessionLookbackHours,
+    activeMinutes: settings.activeSessionMinutes
+  };
+}
+
 function mergeTotals(providers) {
   const total = {
     name: "total",
@@ -676,6 +975,7 @@ function collectUsage(rawSettings = {}, now = new Date()) {
   applyCodexBarData("codex", codex, settings, now);
   applyCodexBarData("claude", claude, settings, now);
   const total = mergeTotals([codex, claude]);
+  const sessions = collectSessionStatus(settings, now);
 
   return {
     generatedAt: now.toISOString(),
@@ -683,6 +983,7 @@ function collectUsage(rawSettings = {}, now = new Date()) {
     periodLabel: periodLabel(settings.windowDays),
     settings,
     total,
+    sessions,
     providers: {
       codex,
       claude
@@ -721,6 +1022,10 @@ function mainDisplay(summary, mode) {
   if (mode === "claude-sonnet" || mode === "claude-opus") return singleLimitDisplay(summary.providers.claude, "opus");
   if (mode === "cost-30d") return displayCost(summary.total.cost.thirtyDayCostNanos);
   if (mode === "tokens-today") return shortNumber(summary.total.cost.todayTokens || summary.total.tokens.total);
+  if (mode === "agent-sessions") return `${summary.sessions.total.active} active`;
+  if (mode === "codex-sessions") return `${summary.sessions.codex.active} active`;
+  if (mode === "claude-sessions") return `${summary.sessions.claude.active} active`;
+  if (mode === "needs-input") return `${summary.sessions.total.needsInput} input`;
   const codexSession = limitFor(summary.providers.codex, "session");
   const claudeSession = limitFor(summary.providers.claude, "session");
   if (codexSession || claudeSession) {
@@ -806,6 +1111,18 @@ function updatedLabel(summary) {
   return Number.isFinite(updated.getTime())
     ? `${String(updated.getHours()).padStart(2, "0")}:${String(updated.getMinutes()).padStart(2, "0")}`
     : "";
+}
+
+function relativeAgeLabel(iso, now = new Date()) {
+  if (!iso) return "none";
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "unknown";
+  const minutes = Math.max(0, Math.round((now.getTime() - date.getTime()) / 60000));
+  if (minutes < 1) return "now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
 function limitLineSvg(limit, y, color, now) {
@@ -951,6 +1268,58 @@ function renderSingleTodayTokensSvg(summary) {
   });
 }
 
+function renderSessionsSvg(summary, providerName) {
+  const sessions = summary.sessions[providerName] || emptySessionSummary(providerName);
+  const color = providerName === "claude" ? "#e28a67" : providerName === "codex" ? "#54c7d4" : "#66b8ff";
+  const title = providerName === "claude" ? "Claude Sessions" : providerName === "codex" ? "Codex Sessions" : "Agent Sessions";
+  const now = new Date(summary.generatedAt);
+  const inputShare = sessions.active ? Math.min(100, Math.round((sessions.needsInput / sessions.active) * 100)) : 0;
+  const runningShare = sessions.active ? Math.min(100, Math.round((sessions.running / sessions.active) * 100)) : 0;
+  const runningWidth = Math.max(0, Math.round((runningShare / 100) * 108));
+  const inputWidth = Math.min(108 - runningWidth, Math.max(0, Math.round((inputShare / 100) * 108)));
+  const recent = `${sessions.recent} in ${summary.sessions.lookbackHours}h`;
+  const updated = relativeAgeLabel(sessions.latestAt, now);
+  const split = providerName === "total"
+    ? `C ${summary.sessions.codex.active} / A ${summary.sessions.claude.active}`
+    : `${sessions.running} running`;
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144">
+  <rect width="144" height="144" rx="18" fill="#0b0f14"/>
+  <rect x="9" y="9" width="126" height="126" rx="14" fill="#111820" stroke="#2b3948" stroke-width="2"/>
+  <text x="18" y="29" font-family="Arial, sans-serif" font-size="12" font-weight="700" fill="#f8fafc">${escapeXml(title)}</text>
+  <text x="126" y="29" text-anchor="end" font-family="Arial, sans-serif" font-size="8" fill="#9aa7b5">${escapeXml(updated)}</text>
+  <text x="33" y="68" text-anchor="middle" font-family="Arial, sans-serif" font-size="25" font-weight="700" fill="${color}">${escapeXml(sessions.active)}</text>
+  <text x="33" y="84" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#9aa7b5">active</text>
+  <text x="75" y="68" text-anchor="middle" font-family="Arial, sans-serif" font-size="25" font-weight="700" fill="#3ddc97">${escapeXml(sessions.running)}</text>
+  <text x="75" y="84" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#9aa7b5">working</text>
+  <text x="116" y="68" text-anchor="middle" font-family="Arial, sans-serif" font-size="25" font-weight="700" fill="#ffb15f">${escapeXml(sessions.needsInput)}</text>
+  <text x="116" y="84" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#9aa7b5">input</text>
+  <rect x="18" y="101" width="108" height="8" rx="4" fill="#2a3440"/>
+  <rect x="18" y="101" width="${runningWidth}" height="8" rx="4" fill="#3ddc97"/>
+  <rect x="${18 + runningWidth}" y="101" width="${inputWidth}" height="8" rx="4" fill="#ffb15f"/>
+  <text x="18" y="126" font-family="Arial, sans-serif" font-size="9" fill="#9aa7b5">${escapeXml(recent)}</text>
+  <text x="126" y="126" text-anchor="end" font-family="Arial, sans-serif" font-size="9" fill="#9aa7b5">${escapeXml(split)}</text>
+</svg>`;
+}
+
+function renderNeedsInputSvg(summary) {
+  const total = summary.sessions.total || emptySessionSummary("total");
+  const codex = summary.sessions.codex || emptySessionSummary("codex");
+  const claude = summary.sessions.claude || emptySessionSummary("claude");
+  const active = total.active || codex.active + claude.active;
+  const percent = active ? Math.min(100, Math.round((total.needsInput / active) * 100)) : 0;
+  const latest = relativeAgeLabel(total.latestAt, new Date(summary.generatedAt));
+
+  return singleMetricBaseSvg({
+    title: "Needs Input",
+    value: String(total.needsInput),
+    subtitle: `Codex ${codex.needsInput} / Claude ${claude.needsInput}`,
+    color: "#ffb15f",
+    percent,
+    footer: `${active} active, latest ${latest}`
+  });
+}
+
 function renderKeySvg(summary, mode = "combined") {
   const normalizedMode = DISPLAY_MODES.includes(mode) ? mode : "combined";
   if (normalizedMode === "codex" || normalizedMode === "claude") {
@@ -963,6 +1332,10 @@ function renderKeySvg(summary, mode = "combined") {
   if (normalizedMode === "claude-sonnet" || normalizedMode === "claude-opus") return renderSingleLimitSvg(summary, "claude", "opus");
   if (normalizedMode === "cost-30d") return renderSingleCostSvg(summary);
   if (normalizedMode === "tokens-today") return renderSingleTodayTokensSvg(summary);
+  if (normalizedMode === "agent-sessions") return renderSessionsSvg(summary, "total");
+  if (normalizedMode === "codex-sessions") return renderSessionsSvg(summary, "codex");
+  if (normalizedMode === "claude-sessions") return renderSessionsSvg(summary, "claude");
+  if (normalizedMode === "needs-input") return renderNeedsInputSvg(summary);
   return renderCombinedSvg(summary);
 }
 

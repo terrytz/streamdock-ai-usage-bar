@@ -23,6 +23,8 @@
         "codexBarCostPath": "~/Library/Caches/CodexBar/cost-usage",
         "useCodexBarData": true,
         "includeClaudeSubagents": true,
+        "sessionLookbackHours": 24,
+        "activeSessionMinutes": 30,
         "maxFiles": 2000
       },
       "Controllers": [

@@ -375,3 +375,77 @@ test("renderKeySvg supports single-purpose display modes", () => {
   assert.match(svgs[5], /30d Cost/);
   assert.match(svgs[6], /Today Tokens/);
 });
+
+test("collectUsage summarizes active agent sessions and human-input waits", () => {
+  const root = makeTempDir();
+  const now = new Date("2026-06-10T15:40:00Z");
+  const activeTimestamp = now.toISOString();
+  const codexPath = path.join(root, ".codex");
+  const claudePath = path.join(root, ".claude", "projects");
+
+  writeJsonl(path.join(codexPath, "sessions", "2026", "06", "10", "codex-running.jsonl"), [
+    { timestamp: activeTimestamp, type: "session_meta", payload: { id: "codex-running", cwd: "/work/a" } },
+    { timestamp: activeTimestamp, type: "response_item", payload: { type: "reasoning" } }
+  ]);
+
+  writeJsonl(path.join(codexPath, "sessions", "2026", "06", "10", "codex-input.jsonl"), [
+    { timestamp: activeTimestamp, type: "session_meta", payload: { id: "codex-input", cwd: "/work/b" } },
+    { timestamp: activeTimestamp, type: "response_item", payload: { type: "message", role: "assistant" } }
+  ]);
+
+  writeJsonl(path.join(claudePath, "project-a", "claude-input.jsonl"), [
+    {
+      timestamp: activeTimestamp,
+      type: "assistant",
+      sessionId: "claude-input",
+      cwd: "/work/c",
+      message: {
+        role: "assistant",
+        stop_reason: "end_turn"
+      }
+    }
+  ]);
+
+  writeJsonl(path.join(claudePath, "project-b", "claude-running.jsonl"), [
+    {
+      timestamp: activeTimestamp,
+      type: "assistant",
+      sessionId: "claude-running",
+      cwd: "/work/d",
+      message: {
+        role: "assistant",
+        stop_reason: "tool_use"
+      }
+    }
+  ]);
+
+  const summary = collectUsage({
+    codexPath,
+    claudePath,
+    useCodexBarData: false,
+    windowDays: 7,
+    sessionLookbackHours: 24,
+    activeSessionMinutes: 30,
+    maxFiles: 100
+  }, now);
+
+  assert.equal(summary.sessions.codex.recent, 2);
+  assert.equal(summary.sessions.codex.active, 2);
+  assert.equal(summary.sessions.codex.running, 1);
+  assert.equal(summary.sessions.codex.needsInput, 1);
+  assert.equal(summary.sessions.claude.recent, 2);
+  assert.equal(summary.sessions.claude.active, 2);
+  assert.equal(summary.sessions.claude.running, 1);
+  assert.equal(summary.sessions.claude.needsInput, 1);
+  assert.equal(summary.sessions.total.active, 4);
+  assert.equal(summary.sessions.total.running, 2);
+  assert.equal(summary.sessions.total.needsInput, 2);
+
+  const modes = ["agent-sessions", "codex-sessions", "claude-sessions", "needs-input"];
+  const svgs = modes.map((mode) => renderKeySvg(summary, mode));
+  assert.equal(new Set(svgs).size, modes.length);
+  assert.match(svgs[0], /Agent Sessions/);
+  assert.match(svgs[1], /Codex Sessions/);
+  assert.match(svgs[2], /Claude Sessions/);
+  assert.match(svgs[3], /Needs Input/);
+});

@@ -70,6 +70,7 @@ function compactSummary(summary) {
     windowStart: summary.windowStart,
     periodLabel: summary.periodLabel,
     total: summary.total,
+    sessions: summary.sessions,
     providers: {
       codex: compactProvider(summary.providers.codex),
       claude: compactProvider(summary.providers.claude)

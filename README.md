@@ -16,6 +16,12 @@ The plugin reads local JSONL histories from `~/.codex/sessions`, `~/.codex/archi
 - `Claude Sonnet`: one large Sonnet quota button, backed by CodexBar's current model-limit bucket.
 - `30d Cost`: combined Codex + Claude 30-day cost.
 - `Today Tokens`: combined Codex + Claude tokens today.
+- `Agent Sessions`: active, working, and needs-input counts across Codex CLI and Claude Code.
+- `Codex Sessions`: focused Codex CLI session monitor.
+- `Claude Sessions`: focused Claude Code session monitor.
+- `Needs Input`: one large human-input-needed counter with Codex/Claude split.
+
+Session monitor modes scan recent local JSONL session files. A session is `active` when its latest event is inside the configured active window, `working` when the latest event looks like reasoning/tool work, and `needs input` when the latest assistant response appears complete and is waiting for the next human turn. The defaults are a 24-hour lookback and a 30-minute active window.
 
 ## Quick Install
 
