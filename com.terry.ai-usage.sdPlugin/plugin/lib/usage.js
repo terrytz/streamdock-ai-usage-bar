@@ -104,9 +104,7 @@ function codexSessionRootsFor(inputPath) {
   const roots = [];
   try {
     const sessions = path.join(root, "sessions");
-    const archived = path.join(root, "archived_sessions");
     if (fs.existsSync(sessions)) roots.push(sessions);
-    if (fs.existsSync(archived)) roots.push(archived);
   } catch {
     // Fall back to the configured path below.
   }
@@ -849,7 +847,7 @@ function summarizeSessionMap(provider, sessionMap, settings, now) {
     const assistantLatest = item.lastRole === "assistant"
       || item.lastEventType === "agent_message"
       || item.lastEventType === "message";
-    const needsInput = assistantLatest && !running && (
+    const needsInput = active && assistantLatest && !running && (
       !item.lastStopReason
       || item.lastStopReason === "end_turn"
       || item.lastStopReason === "stop"

@@ -449,3 +449,51 @@ test("collectUsage summarizes active agent sessions and human-input waits", () =
   assert.match(svgs[2], /Claude Sessions/);
   assert.match(svgs[3], /Needs Input/);
 });
+
+test("collectUsage does not count stale or archived sessions as needing input", () => {
+  const root = makeTempDir();
+  const now = new Date("2026-06-10T15:40:00Z");
+  const staleTimestamp = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString();
+  const codexPath = path.join(root, ".codex");
+  const claudePath = path.join(root, ".claude", "projects");
+
+  writeJsonl(path.join(codexPath, "archived_sessions", "2026", "06", "10", "archived.jsonl"), [
+    { timestamp: now.toISOString(), type: "session_meta", payload: { id: "archived-session", cwd: "/work/archived" } },
+    { timestamp: now.toISOString(), type: "response_item", payload: { type: "message", role: "assistant" } }
+  ]);
+
+  writeJsonl(path.join(codexPath, "sessions", "2026", "06", "10", "stale-codex.jsonl"), [
+    { timestamp: staleTimestamp, type: "session_meta", payload: { id: "stale-codex", cwd: "/work/stale" } },
+    { timestamp: staleTimestamp, type: "response_item", payload: { type: "message", role: "assistant" } }
+  ]);
+
+  writeJsonl(path.join(claudePath, "project-a", "stale-claude.jsonl"), [
+    {
+      timestamp: staleTimestamp,
+      type: "assistant",
+      sessionId: "stale-claude",
+      message: {
+        role: "assistant",
+        stop_reason: "end_turn"
+      }
+    }
+  ]);
+
+  const summary = collectUsage({
+    codexPath,
+    claudePath,
+    useCodexBarData: false,
+    windowDays: 7,
+    sessionLookbackHours: 24,
+    activeSessionMinutes: 30,
+    maxFiles: 100
+  }, now);
+
+  assert.equal(summary.sessions.codex.recent, 1);
+  assert.equal(summary.sessions.codex.active, 0);
+  assert.equal(summary.sessions.codex.needsInput, 0);
+  assert.equal(summary.sessions.claude.recent, 1);
+  assert.equal(summary.sessions.claude.active, 0);
+  assert.equal(summary.sessions.claude.needsInput, 0);
+  assert.equal(summary.sessions.total.needsInput, 0);
+});
