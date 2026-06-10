@@ -1,0 +1,5 @@
+.DS_Store
+node_modules/
+coverage/
+*.log
+com.terry.ai-usage.sdPlugin/logs/

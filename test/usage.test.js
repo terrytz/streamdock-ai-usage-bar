@@ -1,0 +1,377 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const test = require("node:test");
+
+const {
+  collectUsage,
+  renderKeySvg,
+  shortNumber,
+  tokenSummaryFromUsage
+} = require("../com.terry.ai-usage.sdPlugin/plugin/lib/usage");
+
+function makeTempDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "streamdock-ai-usage-"));
+}
+
+function writeJsonl(filePath, records) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
+}
+
+test("collectUsage counts Claude and Codex token fields with de-duplication", () => {
+  const root = makeTempDir();
+  const now = new Date();
+  const timestamp = now.toISOString();
+  const codexPath = path.join(root, ".codex");
+  const claudePath = path.join(root, ".claude", "projects");
+
+  writeJsonl(path.join(codexPath, "sessions", "2026", "06", "10", "codex.jsonl"), [
+    { timestamp, type: "session_meta", payload: { id: "codex-session-1" } },
+    { timestamp, type: "turn_context", payload: { turn_id: "turn-1" } },
+    {
+      timestamp,
+      type: "response_item",
+      uuid: "codex-usage-1",
+      payload: {
+        type: "message",
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5
+        }
+      }
+    }
+  ]);
+
+  writeJsonl(path.join(claudePath, "project-a", "claude.jsonl"), [
+    {
+      timestamp,
+      type: "assistant",
+      requestId: "request-1",
+      sessionId: "claude-session-1",
+      message: {
+        id: "message-1",
+        role: "assistant",
+        usage: {
+          input_tokens: 10,
+          cache_creation_input_tokens: 20,
+          cache_read_input_tokens: 7,
+          output_tokens: 5
+        }
+      }
+    },
+    {
+      timestamp,
+      type: "assistant",
+      requestId: "request-1",
+      sessionId: "claude-session-1",
+      message: {
+        id: "message-1",
+        role: "assistant",
+        usage: {
+          input_tokens: 10,
+          cache_creation_input_tokens: 20,
+          cache_read_input_tokens: 7,
+          output_tokens: 5
+        }
+      }
+    },
+    {
+      timestamp,
+      type: "user",
+      sessionId: "claude-session-1",
+      message: {
+        role: "user",
+        content: "not inspected by parser"
+      }
+    }
+  ]);
+
+  const summary = collectUsage({
+    codexPath,
+    claudePath,
+    useCodexBarData: false,
+    windowDays: 7,
+    maxFiles: 100
+  }, now);
+
+  assert.equal(summary.providers.codex.sessions, 1);
+  assert.equal(summary.providers.codex.turns, 1);
+  assert.equal(summary.providers.codex.tokens.total, 15);
+  assert.equal(summary.providers.codex.requests, 1);
+
+  assert.equal(summary.providers.claude.sessions, 1);
+  assert.equal(summary.providers.claude.requests, 1);
+  assert.equal(summary.providers.claude.tokens.total, 42);
+
+  assert.equal(summary.total.tokens.total, 57);
+  assert.equal(summary.total.requests, 2);
+});
+
+test("collectUsage can exclude Claude subagent files", () => {
+  const root = makeTempDir();
+  const now = new Date();
+  const timestamp = now.toISOString();
+  const claudePath = path.join(root, ".claude", "projects");
+
+  writeJsonl(path.join(claudePath, "project-a", "subagents", "agent.jsonl"), [
+    {
+      timestamp,
+      type: "assistant",
+      requestId: "subagent-request",
+      sessionId: "claude-session-1",
+      message: {
+        role: "assistant",
+        usage: {
+          input_tokens: 5,
+          output_tokens: 5
+        }
+      }
+    }
+  ]);
+
+  const excluded = collectUsage({
+    codexPath: path.join(root, ".codex"),
+    claudePath,
+    useCodexBarData: false,
+    includeClaudeSubagents: false,
+    windowDays: 7,
+    maxFiles: 100
+  }, now);
+
+  const included = collectUsage({
+    codexPath: path.join(root, ".codex"),
+    claudePath,
+    useCodexBarData: false,
+    includeClaudeSubagents: true,
+    windowDays: 7,
+    maxFiles: 100
+  }, now);
+
+  assert.equal(excluded.providers.claude.tokens.total, 0);
+  assert.equal(included.providers.claude.tokens.total, 10);
+});
+
+test("tokenSummaryFromUsage supports OpenAI total_tokens without double-counting cached details", () => {
+  const summary = tokenSummaryFromUsage({
+    input_tokens: 100,
+    output_tokens: 20,
+    total_tokens: 120,
+    input_tokens_details: {
+      cached_tokens: 80
+    },
+    output_tokens_details: {
+      reasoning_tokens: 12
+    }
+  });
+
+  assert.equal(summary.input, 100);
+  assert.equal(summary.output, 20);
+  assert.equal(summary.cacheRead, 80);
+  assert.equal(summary.reasoning, 12);
+  assert.equal(summary.total, 120);
+});
+
+test("renderKeySvg creates a StreamDock-compatible SVG data surface", () => {
+  const root = makeTempDir();
+  const now = new Date();
+  const timestamp = now.toISOString();
+  const claudePath = path.join(root, ".claude", "projects");
+
+  writeJsonl(path.join(claudePath, "project-a", "claude.jsonl"), [
+    {
+      timestamp,
+      type: "assistant",
+      requestId: "request-1",
+      sessionId: "claude-session-1",
+      message: {
+        role: "assistant",
+        usage: {
+          input_tokens: 1000,
+          output_tokens: 250
+        }
+      }
+    }
+  ]);
+
+  const summary = collectUsage({
+    codexPath: path.join(root, ".codex"),
+    claudePath,
+    useCodexBarData: false,
+    windowDays: 7,
+    maxFiles: 100
+  }, now);
+
+  const svg = renderKeySvg(summary, "combined");
+  assert.match(svg, /<svg/);
+  assert.match(svg, /Claude/);
+  assert.match(svg, /1\.3K/);
+  assert.equal(shortNumber(1250), "1.3K");
+});
+
+test("collectUsage reads CodexBar session and weekly limits", () => {
+  const root = makeTempDir();
+  const now = new Date("2026-06-10T15:40:00Z");
+  const historyPath = path.join(root, "history");
+  const costPath = path.join(root, "cost");
+
+  fs.mkdirSync(historyPath, { recursive: true });
+  fs.writeFileSync(path.join(historyPath, "codex.json"), JSON.stringify({
+    accounts: {
+      account: [
+        {
+          name: "session",
+          windowMinutes: 300,
+          entries: [
+            {
+              capturedAt: "2026-06-10T15:38:35Z",
+              resetsAt: "2026-06-10T17:30:43Z",
+              usedPercent: 38
+            }
+          ]
+        },
+        {
+          name: "weekly",
+          windowMinutes: 10080,
+          entries: [
+            {
+              capturedAt: "2026-06-10T15:38:35Z",
+              resetsAt: "2026-06-11T01:00:23Z",
+              usedPercent: 94
+            }
+          ]
+        }
+      ]
+    },
+    version: 1
+  }));
+  fs.writeFileSync(path.join(historyPath, "claude.json"), JSON.stringify({ accounts: {}, version: 1 }));
+
+  fs.mkdirSync(costPath, { recursive: true });
+  fs.writeFileSync(path.join(costPath, "codex-v8.json"), JSON.stringify({
+    days: {
+      "2026-06-10": {
+        "gpt-5.5": [1000, 900, 50]
+      }
+    },
+    files: {
+      file: {
+        codexCostNanos: {
+          "2026-06-10": {
+            "gpt-5.5": 2500000000
+          }
+        }
+      }
+    }
+  }));
+  fs.writeFileSync(path.join(costPath, "claude-v2.json"), JSON.stringify({ days: {}, files: {} }));
+
+  const summary = collectUsage({
+    codexPath: path.join(root, ".codex"),
+    claudePath: path.join(root, ".claude"),
+    codexBarHistoryPath: historyPath,
+    codexBarCostPath: costPath,
+    useCodexBarData: true,
+    windowDays: 7,
+    maxFiles: 100
+  }, now);
+
+  assert.equal(summary.providers.codex.limits[0].name, "session");
+  assert.equal(summary.providers.codex.limits[0].leftPercent, 62);
+  assert.equal(summary.providers.codex.limits[1].name, "weekly");
+  assert.equal(summary.providers.codex.limits[1].leftPercent, 6);
+  assert.equal(summary.providers.codex.cost.latestTokens, 1050);
+  assert.equal(summary.providers.codex.cost.thirtyDayCostNanos, 2500000000);
+
+  const focused = renderKeySvg(summary, "codex");
+  const combined = renderKeySvg(summary, "combined");
+  assert.match(focused, /Session/);
+  assert.match(focused, /62%/);
+  assert.match(focused, /Weekly/);
+  assert.match(focused, /6%/);
+  assert.notEqual(focused, combined);
+});
+
+test("renderKeySvg supports single-purpose display modes", () => {
+  const root = makeTempDir();
+  const now = new Date("2026-06-10T15:40:00Z");
+  const historyPath = path.join(root, "history");
+  const costPath = path.join(root, "cost");
+
+  fs.mkdirSync(historyPath, { recursive: true });
+  fs.writeFileSync(path.join(historyPath, "codex.json"), JSON.stringify({
+    accounts: {
+      account: [
+        {
+          name: "session",
+          windowMinutes: 300,
+          entries: [{ capturedAt: now.toISOString(), resetsAt: "2026-06-10T17:30:43Z", usedPercent: 38 }]
+        },
+        {
+          name: "weekly",
+          windowMinutes: 10080,
+          entries: [{ capturedAt: now.toISOString(), resetsAt: "2026-06-11T01:00:23Z", usedPercent: 94 }]
+        }
+      ]
+    }
+  }));
+  fs.writeFileSync(path.join(historyPath, "claude.json"), JSON.stringify({
+    accounts: {
+      account: [
+        {
+          name: "session",
+          windowMinutes: 300,
+          entries: [{ capturedAt: now.toISOString(), resetsAt: "2026-06-10T16:00:00Z", usedPercent: 71 }]
+        },
+        {
+          name: "weekly",
+          windowMinutes: 10080,
+          entries: [{ capturedAt: now.toISOString(), resetsAt: "2026-06-15T10:00:00Z", usedPercent: 21 }]
+        },
+        {
+          name: "opus",
+          windowMinutes: 10080,
+          entries: [{ capturedAt: now.toISOString(), resetsAt: "2026-06-15T10:00:00Z", usedPercent: 2 }]
+        }
+      ]
+    }
+  }));
+  fs.mkdirSync(costPath, { recursive: true });
+  fs.writeFileSync(path.join(costPath, "codex-v8.json"), JSON.stringify({
+    days: { "2026-06-10": { "gpt-5.5": [1000, 0, 50] } },
+    files: { file: { codexCostNanos: { "2026-06-10": { "gpt-5.5": 2500000000 } } } }
+  }));
+  fs.writeFileSync(path.join(costPath, "claude-v2.json"), JSON.stringify({
+    days: { "2026-06-10": { "claude-sonnet-4-6": [100, 0, 20, 30, 500000000] } },
+    files: {}
+  }));
+
+  const summary = collectUsage({
+    codexPath: path.join(root, ".codex"),
+    claudePath: path.join(root, ".claude"),
+    codexBarHistoryPath: historyPath,
+    codexBarCostPath: costPath,
+    useCodexBarData: true,
+    maxFiles: 100
+  }, now);
+
+  const modes = [
+    "codex-session",
+    "codex-weekly",
+    "claude-session",
+    "claude-weekly",
+    "claude-sonnet",
+    "cost-30d",
+    "tokens-today"
+  ];
+  const svgs = modes.map((mode) => renderKeySvg(summary, mode));
+  assert.equal(new Set(svgs).size, modes.length);
+  assert.match(svgs[0], /Codex Session/);
+  assert.match(svgs[1], /Codex Weekly/);
+  assert.match(svgs[4], /Claude Sonnet/);
+  assert.match(svgs[5], /30d Cost/);
+  assert.match(svgs[6], /Today Tokens/);
+});

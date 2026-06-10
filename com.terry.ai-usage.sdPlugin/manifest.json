@@ -1,0 +1,64 @@
+{
+  "Actions": [
+    {
+      "UUID": "com.terry.ai-usage.summary",
+      "Icon": "static/action.svg",
+      "Name": "AI Usage",
+      "DisableAutomaticStates": true,
+      "States": [
+        {
+          "Image": "static/action.svg",
+          "TitleAlignment": "bottom",
+          "FontSize": "9",
+          "ShowTitle": false
+        }
+      ],
+      "Settings": {
+        "windowDays": 1,
+        "refreshSeconds": 60,
+        "displayMode": "combined",
+        "codexPath": "~/.codex",
+        "claudePath": "~/.claude/projects",
+        "codexBarHistoryPath": "~/Library/Application Support/com.steipete.codexbar/history",
+        "codexBarCostPath": "~/Library/Caches/CodexBar/cost-usage",
+        "useCodexBarData": true,
+        "includeClaudeSubagents": true,
+        "maxFiles": 2000
+      },
+      "Controllers": [
+        "Keypad"
+      ],
+      "UserTitleEnabled": false,
+      "SupportedInMultiActions": false,
+      "Tooltip": "Show local Codex and Claude usage data",
+      "PropertyInspectorPath": "propertyInspector/index.html"
+    }
+  ],
+  "SDKVersion": 1,
+  "Author": "Terry",
+  "Name": "AI Usage",
+  "Icon": "static/icon.svg",
+  "CodePathWin": "plugin/index.js",
+  "CodePathMac": "plugin/index.js",
+  "Description": "Displays local Codex and Claude usage data from JSONL histories.",
+  "Category": "AI",
+  "CategoryIcon": "static/category.svg",
+  "Version": "0.1.0",
+  "URL": "https://creator.key123.vip/en/guide/get-started.html",
+  "OS": [
+    {
+      "Platform": "mac",
+      "MinimumVersion": "10.15"
+    },
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
+  ],
+  "Software": {
+    "MinimumVersion": "3.10.191.0421"
+  },
+  "Nodejs": {
+    "Version": "20"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "streamdock-ai-usage-bar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "StreamDock plugin for viewing local Codex and Claude usage history.",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node --check com.terry.ai-usage.sdPlugin/plugin/index.js && node --check com.terry.ai-usage.sdPlugin/plugin/lib/usage.js && node --check com.terry.ai-usage.sdPlugin/plugin/lib/streamdock.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
