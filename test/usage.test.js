@@ -497,3 +497,72 @@ test("collectUsage does not count stale or archived sessions as needing input", 
   assert.equal(summary.sessions.claude.needsInput, 0);
   assert.equal(summary.sessions.total.needsInput, 0);
 });
+
+test("collectUsage keeps newest Claude session status when subagent files share the session id", () => {
+  const root = makeTempDir();
+  const now = new Date("2026-06-10T15:40:00Z");
+  const olderTimestamp = new Date(now.getTime() - 5 * 60 * 1000).toISOString();
+  const toolUseTimestamp = new Date(now.getTime() - 90 * 1000).toISOString();
+  const toolResultTimestamp = new Date(now.getTime() - 60 * 1000).toISOString();
+  const claudePath = path.join(root, ".claude", "projects");
+  const sessionId = "claude-shared-session";
+
+  writeJsonl(path.join(claudePath, "project-a", "main.jsonl"), [
+    {
+      timestamp: toolUseTimestamp,
+      type: "assistant",
+      sessionId,
+      cwd: "/work/main",
+      message: {
+        role: "assistant",
+        stop_reason: "tool_use"
+      }
+    },
+    {
+      timestamp: toolResultTimestamp,
+      type: "user",
+      sessionId,
+      cwd: "/work/main",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_test",
+            content: "ok"
+          }
+        ]
+      }
+    }
+  ]);
+
+  writeJsonl(path.join(claudePath, "project-a", "subagents", "agent.jsonl"), [
+    {
+      timestamp: olderTimestamp,
+      type: "assistant",
+      sessionId,
+      cwd: "/work/subagent",
+      message: {
+        role: "assistant",
+        stop_reason: "end_turn"
+      }
+    }
+  ]);
+
+  const summary = collectUsage({
+    codexPath: path.join(root, ".codex"),
+    claudePath,
+    useCodexBarData: false,
+    includeClaudeSubagents: true,
+    windowDays: 7,
+    sessionLookbackHours: 24,
+    activeSessionMinutes: 30,
+    maxFiles: 100
+  }, now);
+
+  assert.equal(summary.sessions.claude.active, 1);
+  assert.equal(summary.sessions.claude.running, 1);
+  assert.equal(summary.sessions.claude.needsInput, 0);
+  assert.equal(summary.sessions.claude.items[0].lastRole, "tool");
+  assert.equal(summary.sessions.claude.items[0].lastStopReason, "tool_use");
+});

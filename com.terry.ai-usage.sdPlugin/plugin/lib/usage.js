@@ -690,7 +690,7 @@ function rememberSession(map, key, patch) {
     files: 0
   };
 
-  const next = { ...existing, ...patch };
+  const next = { ...existing };
   if (patch.latestAt) {
     const ms = new Date(patch.latestAt).getTime();
     if (Number.isFinite(ms) && ms >= existing.latestMs) {
@@ -778,6 +778,12 @@ function inspectCodexSessionFile(file, sessions, windowStart, now) {
   });
 }
 
+function claudeContentTypes(message) {
+  const content = message && message.content;
+  if (!Array.isArray(content)) return [];
+  return content.map((item) => item && item.type).filter(Boolean);
+}
+
 function inspectClaudeSessionFile(file, sessions, windowStart, now) {
   let text;
   try {
@@ -811,13 +817,19 @@ function inspectClaudeSessionFile(file, sessions, windowStart, now) {
     sessionId = record.sessionId || sessionId;
     cwd = record.cwd || cwd;
     source = record.entrypoint || source;
-    const currentStopReason = message.stop_reason || record.stopReason || lastStopReason;
+    if (record.type !== "assistant" && record.type !== "user") continue;
+
+    const contentTypes = claudeContentTypes(message);
+    const isToolResult = contentTypes.includes("tool_result");
+    const currentStopReason = message.stop_reason || record.stopReason || (isToolResult ? lastStopReason : null);
 
     latestAt = timestamp.toISOString();
-    lastEventType = record.type;
-    lastRole = message.role || record.type || lastRole;
+    lastEventType = isToolResult ? "tool_result" : record.type;
+    lastRole = isToolResult ? "tool" : (message.role || record.type || lastRole);
     lastStopReason = currentStopReason;
-    runningSignal = record.type === "assistant" && (!currentStopReason || currentStopReason === "tool_use");
+    runningSignal = currentStopReason === "tool_use"
+      || (record.type === "assistant" && !currentStopReason)
+      || (record.type === "user" && !isToolResult);
   }
 
   if (!latestAt) return;
@@ -843,7 +855,7 @@ function summarizeSessionMap(provider, sessionMap, settings, now) {
 
   for (const item of items) {
     const active = item.latestMs >= activeCutoff;
-    const running = active && item.runningSignal && item.lastStopReason !== "end_turn";
+    const running = active && (item.runningSignal || item.lastStopReason === "tool_use") && item.lastStopReason !== "end_turn";
     const assistantLatest = item.lastRole === "assistant"
       || item.lastEventType === "agent_message"
       || item.lastEventType === "message";
