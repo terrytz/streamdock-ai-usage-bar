@@ -12,6 +12,31 @@ com.terry.ai-usage.sdPlugin
 
 The plugin is installed by placing that folder inside StreamDock's plugins directory, then restarting StreamDock.
 
+## Prerequisites
+
+- StreamDock / HotSpot StreamDock `3.10.191.0421` or newer.
+- macOS 10.15+ or Windows 10+.
+- Git, if installing from the repository.
+- Codex CLI installed and signed in for Codex quota/session data.
+- Claude Code CLI installed and signed in for Claude quota/session data.
+
+The plugin does not require a separate Node.js install for normal use. StreamDock launches it with the Node.js runtime declared in `manifest.json`.
+
+Default data paths:
+
+```text
+Codex:  ~/.codex
+Claude: ~/.claude
+```
+
+Claude quota rows come from:
+
+```sh
+claude -p "/usage"
+```
+
+If a CLI is missing or not signed in, the plugin still loads, but that provider's quota fields may show no data.
+
 ## macOS Install
 
 ### 1. Clone

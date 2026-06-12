@@ -6,6 +6,18 @@ The plugin reads local CLI data from Codex CLI and Claude Code CLI. Codex quota 
 
 All visible keys share one process-wide usage snapshot. The Property Inspector separates per-key display from shared datasource settings. `Display` belongs to the selected key; datasource settings such as refresh interval, scan window, data paths, and session thresholds are propagated across AI Usage keys so every key renders from the same collected Codex/Claude summary.
 
+## Prerequisites
+
+- StreamDock / HotSpot StreamDock `3.10.191.0421` or newer.
+- macOS 10.15+ or Windows 10+.
+- Git, if installing from the repository.
+- Codex CLI installed and signed in, if you want Codex quota/session data. The plugin reads local Codex data from `~/.codex` by default.
+- Claude Code CLI installed and signed in, if you want Claude quota/session data. The plugin reads local Claude data from `~/.claude` by default and runs `claude -p "/usage"` for quota rows.
+
+You do not need to install Node.js separately for normal use; StreamDock runs the plugin with the Node.js runtime declared in `manifest.json`.
+
+If one CLI is missing or not signed in, the plugin still runs, but that provider's quota fields may show no data. Token/session totals depend on local CLI history files already existing on the machine.
+
 ## Display Modes
 
 - `Combined`: Codex CLI and Claude Code session/weekly status on one key.
