@@ -251,6 +251,13 @@ function reusablePreviousLimit(providerName, limit, generatedAt) {
   return providerName === "claude" ? rollForwardResetSession(limit, generatedAt) : null;
 }
 
+function shouldReplaceFallbackLimit(currentLimit, previousLimit) {
+  return currentLimit
+    && previousLimit
+    && currentLimit.source === "claude-cli-header-fallback"
+    && previousLimit.source !== "claude-cli-header-fallback";
+}
+
 function mergeLastGoodLimits(summary, previousSummary) {
   if (!summary || !previousSummary) return summary;
   const generatedAt = Date.parse(summary.generatedAt);
@@ -263,9 +270,12 @@ function mergeLastGoodLimits(summary, previousSummary) {
 
     const merged = new Map(provider.limits.map((limit) => [limit.name, limit]));
     for (const previousLimit of previousProvider.limits) {
-      if (merged.has(previousLimit.name)) continue;
       const reusableLimit = reusablePreviousLimit(providerName, previousLimit, generatedAt);
-      if (reusableLimit) merged.set(reusableLimit.name, reusableLimit);
+      if (!reusableLimit) continue;
+      const currentLimit = merged.get(previousLimit.name);
+      if (!currentLimit || shouldReplaceFallbackLimit(currentLimit, reusableLimit)) {
+        merged.set(reusableLimit.name, reusableLimit);
+      }
     }
     provider.limits = [...merged.values()].sort((a, b) => limitSortValue(a.name) - limitSortValue(b.name));
   }
