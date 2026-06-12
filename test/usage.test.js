@@ -339,6 +339,38 @@ test("collectUsage attaches Claude Code CLI /usage limits", () => {
   assert.match(sonnetSvg, /94%/);
 });
 
+test("collectUsage keeps Claude session visible when /usage returns subscription header only", () => {
+  const root = makeTempDir();
+  const now = new Date("2026-06-12T04:31:00Z");
+  const claudePath = path.join(root, ".claude", "projects");
+  fs.mkdirSync(claudePath, { recursive: true });
+
+  const command = path.join(root, "fake-claude-header");
+  fs.writeFileSync(command, [
+    "#!/bin/sh",
+    "echo 'You are currently using your subscription to power your Claude Code usage'"
+  ].join("\n"));
+  fs.chmodSync(command, 0o755);
+
+  const summary = collectUsage({
+    codexPath: path.join(root, ".codex"),
+    claudePath,
+    claudeUsageCommand: command,
+    maxFiles: 100
+  }, now);
+
+  const session = summary.providers.claude.limits.find((limit) => limit.name === "session");
+  assert.ok(session);
+  assert.equal(session.usedPercent, 0);
+  assert.equal(session.leftPercent, 100);
+  assert.equal(session.source, "claude-cli-header-fallback");
+  assert.equal(summary.providers.claude.errors, 1);
+
+  const svg = renderKeySvg(summary, "claude-session");
+  assert.match(svg, /100%/);
+  assert.match(svg, /0% used/);
+});
+
 test("renderKeySvg supports single-purpose display modes", () => {
   const root = makeTempDir();
   const now = new Date("2026-06-10T15:40:00Z");

@@ -568,6 +568,14 @@ function collectClaudeCliLimits(settings, stats, now = new Date()) {
   const limits = parseClaudeUsageText(output, now);
   if (!limits.length) {
     const preview = output.replace(/\s+/g, " ").trim().slice(0, 120);
+    if (/using your subscription to power your Claude Code usage/i.test(output)) {
+      upsertLimit(stats, makeLimit("session", {
+        usedPercent: 0,
+        windowMinutes: 300,
+        resetsAt: new Date(now.getTime() + 300 * 60 * 1000).toISOString(),
+        capturedAt: now.toISOString()
+      }, "claude-cli-header-fallback", now));
+    }
     addError(stats, `Claude CLI /usage did not include quota lines${commandUsed ? ` via ${commandUsed}` : ""}: ${preview || "empty output"}`);
     return;
   }

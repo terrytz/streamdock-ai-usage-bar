@@ -34,10 +34,15 @@ let connection = null;
 let sharedSummary = null;
 let sharedSettings = null;
 let sharedEffectiveRefreshSeconds = null;
+let cachedLimitSummary = null;
 let sharedRefreshing = false;
 let sharedNeedsRefresh = false;
 let sharedTimer = null;
 let sharedRefreshDebounce = null;
+
+function logDirPath() {
+  return path.join(__dirname, "..", "logs");
+}
 
 function log(level, ...parts) {
   const line = `${new Date().toISOString()} [${level}] ${parts.map((part) => {
@@ -51,11 +56,49 @@ function log(level, ...parts) {
   }).join(" ")}\n`;
 
   try {
-    const logDir = path.join(__dirname, "..", "logs");
+    const logDir = logDirPath();
     fs.mkdirSync(logDir, { recursive: true });
     fs.appendFileSync(path.join(logDir, "ai-usage.log"), line);
   } catch {
     // Logging must never break the key update loop.
+  }
+}
+
+function cachePath() {
+  return path.join(logDirPath(), "usage-cache.json");
+}
+
+function readLimitCache() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(cachePath(), "utf8"));
+    if (!parsed || typeof parsed !== "object" || !parsed.providers) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeLimitCache(summary) {
+  if (!summary || !summary.providers) return;
+  const providers = {};
+  for (const providerName of ["codex", "claude"]) {
+    const provider = summary.providers[providerName];
+    if (!provider || provider.errors || !provider.limits.length) continue;
+    providers[providerName] = { limits: provider.limits };
+  }
+  if (!Object.keys(providers).length) return;
+
+  cachedLimitSummary = {
+    generatedAt: summary.generatedAt,
+    providers
+  };
+
+  try {
+    const logDir = logDirPath();
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(cachePath(), `${JSON.stringify(cachedLimitSummary, null, 2)}\n`);
+  } catch {
+    // Cache writes are best-effort; the in-memory summary is still enough.
   }
 }
 
@@ -176,6 +219,22 @@ function renderAllContexts(summary = sharedSummary) {
   for (const context of contexts.keys()) renderContext(context, summary);
 }
 
+function rollForwardResetSession(limit, generatedAt) {
+  if (!limit || limit.name !== "session" || !limit.resetsAt || !Number.isFinite(generatedAt)) return null;
+  const resetsAt = Date.parse(limit.resetsAt);
+  if (!Number.isFinite(resetsAt) || resetsAt > generatedAt) return null;
+  const windowMinutes = Number(limit.windowMinutes) || 300;
+  return {
+    ...limit,
+    usedPercent: 0,
+    leftPercent: 100,
+    reservePercent: null,
+    resetsAt: new Date(resetsAt + windowMinutes * 60 * 1000).toISOString(),
+    capturedAt: new Date(generatedAt).toISOString(),
+    source: `${limit.source || "cli"}-reset-rollover`
+  };
+}
+
 function mergeLastGoodLimits(summary, previousSummary) {
   if (!summary || !previousSummary) return summary;
   const generatedAt = Date.parse(summary.generatedAt);
@@ -186,10 +245,12 @@ function mergeLastGoodLimits(summary, previousSummary) {
     if (!provider || !previousProvider) continue;
     if (provider.limits.length || !previousProvider.limits.length || !provider.errors) continue;
 
-    provider.limits = previousProvider.limits.filter((limit) => {
-      if (!limit.resetsAt || !Number.isFinite(generatedAt)) return true;
+    provider.limits = previousProvider.limits.flatMap((limit) => {
+      if (!limit.resetsAt || !Number.isFinite(generatedAt)) return [limit];
       const resetsAt = Date.parse(limit.resetsAt);
-      return !Number.isFinite(resetsAt) || resetsAt > generatedAt;
+      if (!Number.isFinite(resetsAt) || resetsAt > generatedAt) return [limit];
+      const rolledForward = providerName === "claude" ? rollForwardResetSession(limit, generatedAt) : null;
+      return rolledForward ? [rolledForward] : [];
     });
   }
 
@@ -207,8 +268,10 @@ function refreshShared(reason = "timer") {
   sharedNeedsRefresh = false;
   sharedSettings = currentSourceSettings();
   try {
-    const summary = mergeLastGoodLimits(collectUsage(sharedSettings), sharedSummary);
+    const collected = collectUsage(sharedSettings);
+    const summary = mergeLastGoodLimits(collected, sharedSummary || cachedLimitSummary);
     sharedSummary = summary;
+    writeLimitCache(collected);
     renderAllContexts(summary);
     log("info", "refreshed shared", reason, {
       contexts: contexts.size,
@@ -362,6 +425,8 @@ function main() {
     runOnce();
     return;
   }
+
+  cachedLimitSummary = readLimitCache();
 
   const args = parseLaunchArgs(process.argv);
   connection = new StreamDockConnection(args, {
