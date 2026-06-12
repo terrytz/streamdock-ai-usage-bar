@@ -2,19 +2,21 @@
 
 StreamDock plugin for showing local Codex and Claude usage on StreamDock / Stream Deck style keys.
 
-The plugin reads local JSONL histories from `~/.codex/sessions`, `~/.codex/archived_sessions`, and `~/.claude/projects`. It also uses CodexBar local history/cache files when available, which provides richer session and weekly quota data.
+The plugin reads local CLI data from Codex CLI and Claude Code CLI. Codex quota data comes from Codex CLI `rate_limits` records under the configured Codex data path, usually `~/.codex`; Claude quota data comes from parsing `claude -p "/usage"`; Claude Code token/session activity comes from the configured Claude data path, usually `~/.claude`.
+
+All visible keys share one process-wide usage snapshot. The Property Inspector separates per-key display from shared datasource settings. `Display` belongs to the selected key; datasource settings such as refresh interval, scan window, data paths, and session thresholds are propagated across AI Usage keys so every key renders from the same collected Codex/Claude summary.
 
 ## Display Modes
 
-- `Combined`: Codex and Claude session/weekly status on one key.
-- `Codex Overview`: Codex session and weekly quota bars.
-- `Claude Overview`: Claude session and weekly quota bars.
+- `Combined`: Codex CLI and Claude Code session/weekly status on one key.
+- `Codex Overview`: Codex CLI session and weekly quota bars.
+- `Claude Overview`: Claude Code session and weekly quota bars plus local activity.
 - `Codex Session`: one large Codex session quota button.
 - `Codex Weekly`: one large Codex weekly quota button.
-- `Claude Session`: one large Claude session quota button.
-- `Claude Weekly`: one large Claude weekly quota button.
-- `Claude Sonnet`: one large Sonnet quota button, backed by CodexBar's current model-limit bucket.
-- `30d Cost`: combined Codex + Claude 30-day cost.
+- `Claude Session`: one large Claude Code session quota button.
+- `Claude Weekly`: one large Claude Code weekly quota button.
+- `Claude Sonnet`: one large Claude Code Sonnet-only weekly quota button.
+- `30d Cost`: reserved for local cost data when available.
 - `Today Tokens`: combined Codex + Claude tokens today.
 - `Agent Sessions`: active, working, and needs-input counts across Codex CLI and Claude Code.
 - `Codex Sessions`: focused Codex CLI session monitor.
@@ -72,7 +74,7 @@ Requirements:
 5. Restart StreamDock after installation.
 6. Verify that the plugin manifest exists at:
    `<StreamDock plugins folder>/com.terry.ai-usage.sdPlugin/manifest.json`
-7. Do not delete or modify user data under `~/.codex`, `~/.claude`, CodexBar caches, or StreamDock configuration except for installing this plugin folder.
+7. Do not delete or modify user data under `~/.codex`, `~/.claude`, or StreamDock configuration except for installing this plugin folder.
 8. Report the final plugin install path and whether StreamDock was restarted.
 
 Useful commands:
@@ -107,6 +109,8 @@ node com.terry.ai-usage.sdPlugin/plugin/index.js --once
 
 ## Notes
 
-- CodexBar data is optional. If present, it supplies session/weekly quota and cost windows.
-- Without CodexBar data, the plugin falls back to local Codex and Claude JSONL usage/activity history.
+- The plugin does not read third-party usage caches. Quota displays must come from the CLIs' own data.
+- Current Codex CLI writes session/weekly quota snapshots as `rate_limits` in its session JSONL. Current Claude Code exposes quota text through `claude -p "/usage"`; the plugin parses the `Current session`, `Current week (all models)`, and `Current week (Sonnet only)` lines.
+- `Codex data` and `Claude data` settings are local transcript/history roots used for token totals and session/activity scanning. They are not used as account credentials.
+- Property Inspector fields under `Shared Data Source` apply across AI Usage keys. The inspector shows the effective shared refresh interval and visible key count.
 - Runtime logs are written under `com.terry.ai-usage.sdPlugin/logs/` and are ignored by git.

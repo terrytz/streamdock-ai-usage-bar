@@ -3,6 +3,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { execFileSync } = require("child_process");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DISPLAY_MODES = Object.freeze([
@@ -28,10 +29,9 @@ const DEFAULT_SETTINGS = Object.freeze({
   refreshSeconds: 60,
   displayMode: "combined",
   codexPath: "~/.codex",
-  claudePath: "~/.claude/projects",
-  codexBarHistoryPath: "~/Library/Application Support/com.steipete.codexbar/history",
-  codexBarCostPath: "~/Library/Caches/CodexBar/cost-usage",
-  useCodexBarData: true,
+  claudePath: "~/.claude",
+  claudeUsageCommand: "claude",
+  claudeUsageTimeoutMs: 8000,
   includeClaudeSubagents: true,
   sessionLookbackHours: 24,
   activeSessionMinutes: 30,
@@ -58,12 +58,16 @@ function normalizeSettings(settings = {}) {
     sessionLookbackHours: clampInteger(merged.sessionLookbackHours, DEFAULT_SETTINGS.sessionLookbackHours, 1, 168),
     activeSessionMinutes: clampInteger(merged.activeSessionMinutes, DEFAULT_SETTINGS.activeSessionMinutes, 5, 240),
     includeClaudeSubagents: merged.includeClaudeSubagents !== false && merged.includeClaudeSubagents !== "false",
-    useCodexBarData: merged.useCodexBarData !== false && merged.useCodexBarData !== "false",
     displayMode,
     codexPath: String(merged.codexPath || DEFAULT_SETTINGS.codexPath).trim(),
     claudePath: String(merged.claudePath || DEFAULT_SETTINGS.claudePath).trim(),
-    codexBarHistoryPath: String(merged.codexBarHistoryPath || DEFAULT_SETTINGS.codexBarHistoryPath).trim(),
-    codexBarCostPath: String(merged.codexBarCostPath || DEFAULT_SETTINGS.codexBarCostPath).trim()
+    claudeUsageCommand: String(merged.claudeUsageCommand || DEFAULT_SETTINGS.claudeUsageCommand).trim(),
+    claudeUsageTimeoutMs: clampInteger(
+      merged.claudeUsageTimeoutMs,
+      DEFAULT_SETTINGS.claudeUsageTimeoutMs,
+      1000,
+      30000
+    )
   };
 }
 
@@ -122,6 +126,22 @@ function claudeRootsFor(inputPath) {
     // Keep the direct path; scanProvider will report the missing or unreadable root.
   }
   return uniqueExistingRoots(roots);
+}
+
+function executableCandidates(command) {
+  const value = String(command || "").trim();
+  const candidates = [];
+  if (value) candidates.push(resolveHomePath(value));
+  if (!value.includes(path.sep)) {
+    candidates.push(
+      path.join(os.homedir(), ".local", "bin", value || "claude"),
+      path.join(os.homedir(), ".claude", "local", value || "claude"),
+      path.join(os.homedir(), ".claude", "bin", value || "claude"),
+      `/opt/homebrew/bin/${value || "claude"}`,
+      `/usr/local/bin/${value || "claude"}`
+    );
+  }
+  return [...new Set(candidates)];
 }
 
 function windowStartForDays(days, now = new Date()) {
@@ -263,6 +283,7 @@ function firstUsageObject(record) {
     record && record.payload && record.payload.message && record.payload.message.usage,
     record && record.payload && record.payload.response && record.payload.response.usage,
     record && record.payload && record.payload.info && record.payload.info.last_token_usage,
+    record && record.payload && record.payload.info && record.payload.info.total_token_usage,
     record && record.response && record.response.usage,
     record && record.item && record.item.usage,
     record && record.payload && record.payload.item && record.payload.item.usage
@@ -374,7 +395,7 @@ function displayLimitLabel(name) {
   const normalized = String(name || "").toLowerCase();
   if (normalized === "session") return "Session";
   if (normalized === "weekly") return "Weekly";
-  if (normalized === "opus") return "Sonnet";
+  if (normalized === "opus") return "Opus";
   if (normalized === "sonnet") return "Sonnet";
   return titleCase(normalized);
 }
@@ -430,10 +451,127 @@ function upsertLimit(stats, limit) {
 
 function collectRecordLimits(provider, record, stats) {
   if (provider !== "codex") return;
-  const rateLimits = record && record.payload && record.payload.rate_limits;
+  const rateLimits = record && (record.rate_limits || (record.payload && record.payload.rate_limits));
   if (!rateLimits || typeof rateLimits !== "object") return;
   upsertLimit(stats, makeLimit("session", rateLimits.primary, "codex-events", record.timestamp));
   upsertLimit(stats, makeLimit("weekly", rateLimits.secondary, "codex-events", record.timestamp));
+}
+
+const MONTH_INDEX = Object.freeze({
+  jan: 0,
+  january: 0,
+  feb: 1,
+  february: 1,
+  mar: 2,
+  march: 2,
+  apr: 3,
+  april: 3,
+  may: 4,
+  jun: 5,
+  june: 5,
+  jul: 6,
+  july: 6,
+  aug: 7,
+  august: 7,
+  sep: 8,
+  sept: 8,
+  september: 8,
+  oct: 9,
+  october: 9,
+  nov: 10,
+  november: 10,
+  dec: 11,
+  december: 11
+});
+
+function resetIsoFromClaudeUsageLabel(label, now = new Date()) {
+  const match = String(label || "").match(/\b([A-Za-z]{3,9})\s+(\d{1,2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\b/i);
+  if (!match) return null;
+
+  const month = MONTH_INDEX[match[1].toLowerCase()];
+  if (month === undefined) return null;
+
+  const day = Number(match[2]);
+  let hour = Number(match[3]);
+  const minute = Number(match[4] || 0);
+  const meridiem = match[5].toLowerCase();
+  if (meridiem === "pm" && hour !== 12) hour += 12;
+  if (meridiem === "am" && hour === 12) hour = 0;
+
+  const date = new Date(now.getFullYear(), month, day, hour, minute, 0, 0);
+  if (!Number.isFinite(date.getTime())) return null;
+  if (date.getTime() < now.getTime() - 30 * DAY_MS) {
+    date.setFullYear(date.getFullYear() + 1);
+  }
+  return date.toISOString();
+}
+
+function parseClaudeUsageText(text, now = new Date()) {
+  const limits = [];
+  const linePattern = /^Current\s+(session|week\s+\(all models\)|week\s+\(Sonnet only\)):\s+(\d+(?:\.\d+)?)%\s+used(?:\s+·\s+resets\s+(.+))?$/i;
+
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const match = line.match(linePattern);
+    if (!match) continue;
+
+    const label = match[1].toLowerCase();
+    const name = label === "session" ? "session" : label.includes("sonnet") ? "sonnet" : "weekly";
+    const windowMinutes = name === "session" ? 300 : 10080;
+    upsertLimit({ limits }, makeLimit(name, {
+      usedPercent: Number(match[2]),
+      windowMinutes,
+      resetsAt: resetIsoFromClaudeUsageLabel(match[3], now),
+      capturedAt: now.toISOString()
+    }, "claude-cli", now));
+  }
+
+  return limits;
+}
+
+function collectClaudeCliLimits(settings, stats, now = new Date()) {
+  if (!settings.claudeUsageCommand) return;
+
+  let output = "";
+  let lastError = null;
+  let commandUsed = null;
+  try {
+    for (const command of executableCandidates(settings.claudeUsageCommand)) {
+      try {
+        output = execFileSync(command, ["-p", "/usage"], {
+          encoding: "utf8",
+          timeout: settings.claudeUsageTimeoutMs,
+          stdio: ["ignore", "pipe", "pipe"],
+          env: {
+            ...process.env,
+            FORCE_COLOR: "0",
+            NO_COLOR: "1",
+            TERM: "dumb"
+          }
+        });
+        commandUsed = command;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (error.code !== "ENOENT") break;
+      }
+    }
+  } catch (error) {
+    lastError = error;
+  }
+
+  if (!output) {
+    addError(stats, `Claude CLI /usage failed: ${lastError ? lastError.message : "no output"}`);
+    return;
+  }
+
+  const limits = parseClaudeUsageText(output, now);
+  if (!limits.length) {
+    const preview = output.replace(/\s+/g, " ").trim().slice(0, 120);
+    addError(stats, `Claude CLI /usage did not include quota lines${commandUsed ? ` via ${commandUsed}` : ""}: ${preview || "empty output"}`);
+    return;
+  }
+  for (const limit of limits) upsertLimit(stats, limit);
 }
 
 function countProviderActivity(provider, record, stats, sessionIds) {
@@ -529,49 +667,6 @@ function scanProvider(provider, roots, settings, now = new Date()) {
   return stats;
 }
 
-function readJsonFile(filePath) {
-  try {
-    if (!fs.existsSync(filePath)) return null;
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function collectCodexBarLimits(provider, settings) {
-  if (!settings.useCodexBarData) return [];
-  const historyRoot = resolveHomePath(settings.codexBarHistoryPath);
-  const filePath = path.join(historyRoot, `${provider}.json`);
-  const history = readJsonFile(filePath);
-  if (!history || typeof history !== "object") return [];
-
-  const latestByName = new Map();
-  const groups = [
-    ...Object.values(history.accounts || {}),
-    history.unscoped || []
-  ];
-
-  for (const limits of groups) {
-    if (!Array.isArray(limits)) continue;
-    for (const limitGroup of limits) {
-      const entries = Array.isArray(limitGroup.entries) ? limitGroup.entries : [];
-      for (const entry of entries) {
-        const limit = makeLimit(limitGroup.name, {
-          ...entry,
-          windowMinutes: limitGroup.windowMinutes
-        }, "codexbar", entry.capturedAt);
-        if (!limit) continue;
-        const existing = latestByName.get(limit.name);
-        const existingCaptured = existing && existing.capturedAt ? new Date(existing.capturedAt).getTime() : 0;
-        const nextCaptured = limit.capturedAt ? new Date(limit.capturedAt).getTime() : 0;
-        if (!existing || nextCaptured >= existingCaptured) latestByName.set(limit.name, limit);
-      }
-    }
-  }
-
-  return [...latestByName.values()].sort((a, b) => limitSortValue(a.name) - limitSortValue(b.name) || a.label.localeCompare(b.label));
-}
-
 function dateKey(date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -595,80 +690,6 @@ function addCost(target, source) {
   target.todayCostNanos += source.todayCostNanos || 0;
   target.thirtyDayCostNanos += source.thirtyDayCostNanos || 0;
   if (!target.source && source.source) target.source = source.source;
-}
-
-function collectCodexBarCost(provider, settings, now = new Date()) {
-  const result = emptyCost();
-  if (!settings.useCodexBarData) return result;
-
-  const costRoot = resolveHomePath(settings.codexBarCostPath);
-  const fileName = provider === "codex" ? "codex-v8.json" : "claude-v2.json";
-  const payload = readJsonFile(path.join(costRoot, fileName));
-  if (!payload || !payload.days || typeof payload.days !== "object") return result;
-
-  const todayKeys = dateKeysForLastDays(1, now);
-  const thirtyDayKeys = dateKeysForLastDays(30, now);
-  let latestDayKey = null;
-
-  for (const dayKey of Object.keys(payload.days)) {
-    if (!latestDayKey || dayKey > latestDayKey) latestDayKey = dayKey;
-    const isToday = todayKeys.has(dayKey);
-    const isThirtyDay = thirtyDayKeys.has(dayKey);
-    if (!isToday && !isThirtyDay) continue;
-
-    for (const values of Object.values(payload.days[dayKey] || {})) {
-      if (!Array.isArray(values)) continue;
-      let tokens = 0;
-      let costNanos = 0;
-      if (provider === "codex") {
-        tokens = numberFrom(values[0]) + numberFrom(values[2]);
-      } else {
-        tokens = numberFrom(values[0]) + numberFrom(values[2]) + numberFrom(values[3]);
-        costNanos = numberFrom(values[4]);
-      }
-      if (isToday) {
-        result.todayTokens += tokens;
-        result.todayCostNanos += costNanos;
-      }
-      if (isThirtyDay) {
-        result.thirtyDayTokens += tokens;
-        result.thirtyDayCostNanos += costNanos;
-      }
-    }
-  }
-
-  if (provider === "codex") {
-    for (const file of Object.values(payload.files || {})) {
-      const costByDay = file && file.codexCostNanos;
-      if (!costByDay || typeof costByDay !== "object") continue;
-      for (const [dayKey, models] of Object.entries(costByDay)) {
-        if (!todayKeys.has(dayKey) && !thirtyDayKeys.has(dayKey)) continue;
-        for (const value of Object.values(models || {})) {
-          if (todayKeys.has(dayKey)) result.todayCostNanos += numberFrom(value);
-          if (thirtyDayKeys.has(dayKey)) result.thirtyDayCostNanos += numberFrom(value);
-        }
-      }
-    }
-  }
-
-  if (latestDayKey && payload.days[latestDayKey]) {
-    for (const values of Object.values(payload.days[latestDayKey])) {
-      if (!Array.isArray(values)) continue;
-      result.latestTokens += provider === "codex"
-        ? numberFrom(values[0]) + numberFrom(values[2])
-        : numberFrom(values[0]) + numberFrom(values[2]) + numberFrom(values[3]);
-    }
-  }
-
-  result.source = "codexbar";
-  return result;
-}
-
-function applyCodexBarData(provider, stats, settings, now) {
-  const limits = collectCodexBarLimits(provider, settings);
-  if (limits.length) stats.limits = limits;
-  const cost = collectCodexBarCost(provider, settings, now);
-  if (cost.source) stats.cost = cost;
 }
 
 function basenameWithoutJsonl(filePath) {
@@ -982,8 +1003,7 @@ function collectUsage(rawSettings = {}, now = new Date()) {
   const settings = normalizeSettings(rawSettings);
   const codex = scanProvider("codex", codexRootsFor(settings.codexPath), settings, now);
   const claude = scanProvider("claude", claudeRootsFor(settings.claudePath), settings, now);
-  applyCodexBarData("codex", codex, settings, now);
-  applyCodexBarData("claude", claude, settings, now);
+  collectClaudeCliLimits(settings, claude, now);
   const total = mergeTotals([codex, claude]);
   const sessions = collectSessionStatus(settings, now);
 
@@ -1029,7 +1049,8 @@ function mainDisplay(summary, mode) {
   if (mode === "codex-weekly") return singleLimitDisplay(summary.providers.codex, "weekly");
   if (mode === "claude-session") return singleLimitDisplay(summary.providers.claude, "session");
   if (mode === "claude-weekly") return singleLimitDisplay(summary.providers.claude, "weekly");
-  if (mode === "claude-sonnet" || mode === "claude-opus") return singleLimitDisplay(summary.providers.claude, "opus");
+  if (mode === "claude-sonnet") return singleLimitDisplay(summary.providers.claude, "sonnet");
+  if (mode === "claude-opus") return singleLimitDisplay(summary.providers.claude, "opus");
   if (mode === "cost-30d") return displayCost(summary.total.cost.thirtyDayCostNanos);
   if (mode === "tokens-today") return shortNumber(summary.total.cost.todayTokens || summary.total.tokens.total);
   if (mode === "agent-sessions") return `${summary.sessions.total.active} active`;
@@ -1059,7 +1080,7 @@ function focusedMainDisplay(provider) {
 
 function singleLimitDisplay(provider, name) {
   const limit = limitFor(provider, name);
-  return limit ? `${limit.leftPercent}% left` : providerDisplay(provider);
+  return limit ? `${limit.leftPercent}% left` : "No quota";
 }
 
 function escapeXml(value) {
@@ -1240,10 +1261,11 @@ function renderSingleLimitSvg(summary, providerName, limitName) {
   const limit = limitFor(provider, limitName);
   const color = providerName === "codex" ? "#54c7d4" : "#e28a67";
   const providerLabel = providerName === "codex" ? "Codex" : "Claude";
-  const title = limit ? `${providerLabel} ${limit.label}` : `${providerLabel} ${titleCase(limitName)}`;
+  const label = limit ? limit.label : displayLimitLabel(limitName);
+  const title = `${providerLabel} ${label}`;
   const value = limit ? `${limit.leftPercent}%` : "-";
-  const reset = limit && limit.resetsAt ? `Resets in ${resetLabel(limit.resetsAt, new Date(summary.generatedAt))}` : "No quota data";
-  const footer = limit ? `${limit.usedPercent}% used` : providerDisplay(provider);
+  const reset = limit && limit.resetsAt ? `Resets in ${resetLabel(limit.resetsAt, new Date(summary.generatedAt))}` : "No CLI quota data";
+  const footer = limit ? `${limit.usedPercent}% used` : "CLI did not expose this limit";
 
   return singleMetricBaseSvg({
     title,
@@ -1339,7 +1361,8 @@ function renderKeySvg(summary, mode = "combined") {
   if (normalizedMode === "codex-weekly") return renderSingleLimitSvg(summary, "codex", "weekly");
   if (normalizedMode === "claude-session") return renderSingleLimitSvg(summary, "claude", "session");
   if (normalizedMode === "claude-weekly") return renderSingleLimitSvg(summary, "claude", "weekly");
-  if (normalizedMode === "claude-sonnet" || normalizedMode === "claude-opus") return renderSingleLimitSvg(summary, "claude", "opus");
+  if (normalizedMode === "claude-sonnet") return renderSingleLimitSvg(summary, "claude", "sonnet");
+  if (normalizedMode === "claude-opus") return renderSingleLimitSvg(summary, "claude", "opus");
   if (normalizedMode === "cost-30d") return renderSingleCostSvg(summary);
   if (normalizedMode === "tokens-today") return renderSingleTodayTokensSvg(summary);
   if (normalizedMode === "agent-sessions") return renderSessionsSvg(summary, "total");
@@ -1380,6 +1403,7 @@ module.exports = {
   svgDataUri,
   titleForSummary,
   shortNumber,
+  parseClaudeUsageText,
   tokenSummaryFromUsage,
   windowStartForDays
 };

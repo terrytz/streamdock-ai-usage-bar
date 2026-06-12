@@ -112,5 +112,5 @@ Agents should:
 - Prefer symlink on macOS and copy on Windows.
 - Restart StreamDock after install.
 - Verify `manifest.json` exists in the installed plugin folder.
-- Never delete user Codex, Claude, CodexBar, or StreamDock data.
+- Never delete user Codex, Claude, or StreamDock data.
 - Never edit credentials, keychains, cookies, or browser caches.

@@ -49,6 +49,38 @@
       width: 100%;
     }
 
+    .section {
+      margin: 0 0 12px;
+      padding: 0 0 4px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .section-title {
+      margin: 14px 0 8px;
+      color: var(--text);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    .hint {
+      grid-column: 2;
+      margin-top: -6px;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.3;
+    }
+
+    .inline-status {
+      margin-top: 4px;
+      color: var(--blue);
+      font-size: 11px;
+      line-height: 1.3;
+      min-height: 14px;
+    }
+
     input,
     select,
     button {
@@ -138,73 +170,76 @@
   </style>
 </head>
 <body>
-  <div class="sdpi-item">
-    <div class="sdpi-item-label">Display</div>
-    <select id="displayMode" class="sdpi-item-value">
-      <option value="combined">Combined</option>
-      <option value="codex">Codex Overview</option>
-      <option value="claude">Claude Overview</option>
-      <option value="codex-session">Codex Session</option>
-      <option value="codex-weekly">Codex Weekly</option>
-      <option value="claude-session">Claude Session</option>
-      <option value="claude-weekly">Claude Weekly</option>
-      <option value="claude-sonnet">Claude Sonnet</option>
-      <option value="cost-30d">30d Cost</option>
-      <option value="tokens-today">Today Tokens</option>
-      <option value="agent-sessions">Agent Sessions</option>
-      <option value="codex-sessions">Codex Sessions</option>
-      <option value="claude-sessions">Claude Sessions</option>
-      <option value="needs-input">Needs Input</option>
-    </select>
-  </div>
-
-  <div class="sdpi-item">
-    <div class="sdpi-item-label">Period days</div>
-    <input id="windowDays" class="sdpi-item-value" type="number" min="1" max="90" step="1">
-  </div>
-
-  <div class="sdpi-item">
-    <div class="sdpi-item-label">Refresh sec</div>
-    <input id="refreshSeconds" class="sdpi-item-value" type="number" min="10" max="3600" step="5">
-  </div>
-
-  <div class="sdpi-item">
-    <div class="sdpi-item-label">Session lookback h</div>
-    <input id="sessionLookbackHours" class="sdpi-item-value" type="number" min="1" max="168" step="1">
-  </div>
-
-  <div class="sdpi-item">
-    <div class="sdpi-item-label">Active min</div>
-    <input id="activeSessionMinutes" class="sdpi-item-value" type="number" min="5" max="240" step="5">
-  </div>
-
-  <div class="sdpi-item">
-    <div class="sdpi-item-label">Codex path</div>
-    <input id="codexPath" class="sdpi-item-value" type="text" spellcheck="false">
-  </div>
-
-  <div class="sdpi-item">
-    <div class="sdpi-item-label">Claude path</div>
-    <input id="claudePath" class="sdpi-item-value" type="text" spellcheck="false">
-  </div>
-
-  <div class="sdpi-item">
-    <div class="sdpi-item-label">CodexBar data</div>
-    <div class="row sdpi-item-value">
-      <input id="useCodexBarData" type="checkbox">
+  <div class="section">
+    <div class="section-title">This Key</div>
+    <div class="sdpi-item">
+      <div class="sdpi-item-label">Display</div>
+      <select id="displayMode" class="sdpi-item-value">
+        <option value="combined">Combined</option>
+        <option value="codex">Codex Overview</option>
+        <option value="claude">Claude Overview</option>
+        <option value="codex-session">Codex Session</option>
+        <option value="codex-weekly">Codex Weekly</option>
+        <option value="claude-session">Claude Session</option>
+        <option value="claude-weekly">Claude Weekly</option>
+        <option value="claude-sonnet">Claude Sonnet</option>
+        <option value="cost-30d">30d Cost</option>
+        <option value="tokens-today">Today Tokens</option>
+        <option value="agent-sessions">Agent Sessions</option>
+        <option value="codex-sessions">Codex Sessions</option>
+        <option value="claude-sessions">Claude Sessions</option>
+        <option value="needs-input">Needs Input</option>
+      </select>
     </div>
   </div>
 
-  <div class="sdpi-item">
-    <div class="sdpi-item-label">Subagents</div>
-    <div class="row sdpi-item-value">
-      <input id="includeClaudeSubagents" type="checkbox">
+  <div class="section">
+    <div class="section-title">Shared Data Source</div>
+    <div class="sdpi-item">
+      <div class="sdpi-item-label">Refresh</div>
+      <div class="sdpi-item-value">
+        <input id="refreshSeconds" class="sdpi-item-value" type="number" min="10" max="3600" step="5">
+        <div id="effectiveRefresh" class="inline-status">Effective: -</div>
+      </div>
     </div>
-  </div>
+    <div class="hint">All AI Usage keys share one datasource. This value applies to every visible key.</div>
 
-  <div class="sdpi-item">
-    <div class="sdpi-item-label">Max files</div>
-    <input id="maxFiles" class="sdpi-item-value" type="number" min="50" max="10000" step="50">
+    <div class="sdpi-item">
+      <div class="sdpi-item-label">Period days</div>
+      <input id="windowDays" class="sdpi-item-value" type="number" min="1" max="90" step="1">
+    </div>
+
+    <div class="sdpi-item">
+      <div class="sdpi-item-label">Lookback h</div>
+      <input id="sessionLookbackHours" class="sdpi-item-value" type="number" min="1" max="168" step="1">
+    </div>
+
+    <div class="sdpi-item">
+      <div class="sdpi-item-label">Active min</div>
+      <input id="activeSessionMinutes" class="sdpi-item-value" type="number" min="5" max="240" step="5">
+    </div>
+
+    <div class="sdpi-item">
+      <div class="sdpi-item-label">Codex data</div>
+      <input id="codexPath" class="sdpi-item-value" type="text" spellcheck="false">
+    </div>
+
+    <div class="sdpi-item">
+      <div class="sdpi-item-label">Claude data</div>
+      <input id="claudePath" class="sdpi-item-value" type="text" spellcheck="false">
+    </div>
+
+    <div class="sdpi-item">
+      <div class="sdpi-item-label">Subagents</div>
+      <div class="row sdpi-item-value">
+        <input id="includeClaudeSubagents" type="checkbox">
+      </div>
+    </div>
+
+    <div class="sdpi-item">
+      <div class="sdpi-item-label">Max files</div>
+      <input id="maxFiles" class="sdpi-item-value" type="number" min="50" max="10000" step="50">
+    </div>
   </div>
 
   <div class="sdpi-item">
@@ -237,10 +272,9 @@
       refreshSeconds: 60,
       displayMode: "combined",
       codexPath: "~/.codex",
-      claudePath: "~/.claude/projects",
-      codexBarHistoryPath: "~/Library/Application Support/com.steipete.codexbar/history",
-      codexBarCostPath: "~/Library/Caches/CodexBar/cost-usage",
-      useCodexBarData: true,
+      claudePath: "~/.claude",
+      claudeUsageCommand: "claude",
+      claudeUsageTimeoutMs: 8000,
       includeClaudeSubagents: true,
       sessionLookbackHours: 24,
       activeSessionMinutes: 30,
@@ -260,10 +294,10 @@
       activeSessionMinutes: document.getElementById("activeSessionMinutes"),
       codexPath: document.getElementById("codexPath"),
       claudePath: document.getElementById("claudePath"),
-      useCodexBarData: document.getElementById("useCodexBarData"),
       includeClaudeSubagents: document.getElementById("includeClaudeSubagents"),
       maxFiles: document.getElementById("maxFiles")
     };
+    const effectiveRefresh = document.getElementById("effectiveRefresh");
 
     function parseMaybeJson(value, fallback) {
       if (!value) return fallback;
@@ -284,12 +318,24 @@
       fields.activeSessionMinutes.value = merged.activeSessionMinutes || DEFAULT_SETTINGS.activeSessionMinutes;
       fields.codexPath.value = merged.codexPath || DEFAULT_SETTINGS.codexPath;
       fields.claudePath.value = merged.claudePath || DEFAULT_SETTINGS.claudePath;
-      fields.useCodexBarData.checked = merged.useCodexBarData !== false && merged.useCodexBarData !== "false";
       fields.includeClaudeSubagents.checked = merged.includeClaudeSubagents !== false && merged.includeClaudeSubagents !== "false";
       fields.maxFiles.value = merged.maxFiles || DEFAULT_SETTINGS.maxFiles;
     }
 
+    function renderSharedState(shared) {
+      if (!shared) {
+        effectiveRefresh.textContent = "Effective: -";
+        return;
+      }
+      const seconds = Number(shared.effectiveRefreshSeconds);
+      const count = Number(shared.contextCount) || 0;
+      const interval = Number.isFinite(seconds) && seconds > 0 ? `${seconds}s` : "-";
+      const keyLabel = count === 1 ? "1 visible key" : `${count} visible keys`;
+      effectiveRefresh.textContent = `Effective: ${interval} across ${keyLabel}`;
+    }
+
     function settingsFromForm() {
+      const current = parseMaybeJson(actionInfo && actionInfo.payload && actionInfo.payload.settings, {});
       return {
         displayMode: fields.displayMode.value,
         windowDays: Number(fields.windowDays.value || DEFAULT_SETTINGS.windowDays),
@@ -298,9 +344,8 @@
         activeSessionMinutes: Number(fields.activeSessionMinutes.value || DEFAULT_SETTINGS.activeSessionMinutes),
         codexPath: fields.codexPath.value.trim() || DEFAULT_SETTINGS.codexPath,
         claudePath: fields.claudePath.value.trim() || DEFAULT_SETTINGS.claudePath,
-        codexBarHistoryPath: DEFAULT_SETTINGS.codexBarHistoryPath,
-        codexBarCostPath: DEFAULT_SETTINGS.codexBarCostPath,
-        useCodexBarData: fields.useCodexBarData.checked,
+        claudeUsageCommand: current.claudeUsageCommand || DEFAULT_SETTINGS.claudeUsageCommand,
+        claudeUsageTimeoutMs: current.claudeUsageTimeoutMs || DEFAULT_SETTINGS.claudeUsageTimeoutMs,
         includeClaudeSubagents: fields.includeClaudeSubagents.checked,
         maxFiles: Number(fields.maxFiles.value || DEFAULT_SETTINGS.maxFiles)
       };
@@ -428,6 +473,7 @@
       if (data.event === "sendToPropertyInspector" && data.payload) {
         if (data.payload.settings) applySettings(data.payload.settings);
         if (data.payload.summary) renderSummary(data.payload.summary);
+        if (data.payload.shared) renderSharedState(data.payload.shared);
       }
     }
 

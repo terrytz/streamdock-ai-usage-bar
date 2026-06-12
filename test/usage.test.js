@@ -8,6 +8,7 @@ const test = require("node:test");
 
 const {
   collectUsage,
+  parseClaudeUsageText,
   renderKeySvg,
   shortNumber,
   tokenSummaryFromUsage
@@ -93,7 +94,7 @@ test("collectUsage counts Claude and Codex token fields with de-duplication", ()
   const summary = collectUsage({
     codexPath,
     claudePath,
-    useCodexBarData: false,
+    claudeUsageCommand: "",
     windowDays: 7,
     maxFiles: 100
   }, now);
@@ -136,7 +137,7 @@ test("collectUsage can exclude Claude subagent files", () => {
   const excluded = collectUsage({
     codexPath: path.join(root, ".codex"),
     claudePath,
-    useCodexBarData: false,
+    claudeUsageCommand: "",
     includeClaudeSubagents: false,
     windowDays: 7,
     maxFiles: 100
@@ -145,7 +146,7 @@ test("collectUsage can exclude Claude subagent files", () => {
   const included = collectUsage({
     codexPath: path.join(root, ".codex"),
     claudePath,
-    useCodexBarData: false,
+    claudeUsageCommand: "",
     includeClaudeSubagents: true,
     windowDays: 7,
     maxFiles: 100
@@ -200,7 +201,7 @@ test("renderKeySvg creates a StreamDock-compatible SVG data surface", () => {
   const summary = collectUsage({
     codexPath: path.join(root, ".codex"),
     claudePath,
-    useCodexBarData: false,
+    claudeUsageCommand: "",
     windowDays: 7,
     maxFiles: 100
   }, now);
@@ -212,69 +213,44 @@ test("renderKeySvg creates a StreamDock-compatible SVG data surface", () => {
   assert.equal(shortNumber(1250), "1.3K");
 });
 
-test("collectUsage reads CodexBar session and weekly limits", () => {
+test("collectUsage reads Codex CLI session and weekly limits", () => {
   const root = makeTempDir();
   const now = new Date("2026-06-10T15:40:00Z");
-  const historyPath = path.join(root, "history");
-  const costPath = path.join(root, "cost");
+  const codexPath = path.join(root, ".codex");
 
-  fs.mkdirSync(historyPath, { recursive: true });
-  fs.writeFileSync(path.join(historyPath, "codex.json"), JSON.stringify({
-    accounts: {
-      account: [
-        {
-          name: "session",
-          windowMinutes: 300,
-          entries: [
-            {
-              capturedAt: "2026-06-10T15:38:35Z",
-              resetsAt: "2026-06-10T17:30:43Z",
-              usedPercent: 38
-            }
-          ]
-        },
-        {
-          name: "weekly",
-          windowMinutes: 10080,
-          entries: [
-            {
-              capturedAt: "2026-06-10T15:38:35Z",
-              resetsAt: "2026-06-11T01:00:23Z",
-              usedPercent: 94
-            }
-          ]
-        }
-      ]
-    },
-    version: 1
-  }));
-  fs.writeFileSync(path.join(historyPath, "claude.json"), JSON.stringify({ accounts: {}, version: 1 }));
-
-  fs.mkdirSync(costPath, { recursive: true });
-  fs.writeFileSync(path.join(costPath, "codex-v8.json"), JSON.stringify({
-    days: {
-      "2026-06-10": {
-        "gpt-5.5": [1000, 900, 50]
-      }
-    },
-    files: {
-      file: {
-        codexCostNanos: {
-          "2026-06-10": {
-            "gpt-5.5": 2500000000
+  writeJsonl(path.join(codexPath, "sessions", "2026", "06", "10", "codex.jsonl"), [
+    {
+      timestamp: "2026-06-10T15:38:35Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: {
+            input_tokens: 1000,
+            output_tokens: 50,
+            total_tokens: 1050
           }
+        }
+      },
+      rate_limits: {
+        primary: {
+          used_percent: 38,
+          window_minutes: 300,
+          resets_at: "2026-06-10T17:30:43Z"
+        },
+        secondary: {
+          used_percent: 94,
+          window_minutes: 10080,
+          resets_at: "2026-06-11T01:00:23Z"
         }
       }
     }
-  }));
-  fs.writeFileSync(path.join(costPath, "claude-v2.json"), JSON.stringify({ days: {}, files: {} }));
+  ]);
 
   const summary = collectUsage({
-    codexPath: path.join(root, ".codex"),
+    codexPath,
     claudePath: path.join(root, ".claude"),
-    codexBarHistoryPath: historyPath,
-    codexBarCostPath: costPath,
-    useCodexBarData: true,
+    claudeUsageCommand: "",
     windowDays: 7,
     maxFiles: 100
   }, now);
@@ -283,8 +259,8 @@ test("collectUsage reads CodexBar session and weekly limits", () => {
   assert.equal(summary.providers.codex.limits[0].leftPercent, 62);
   assert.equal(summary.providers.codex.limits[1].name, "weekly");
   assert.equal(summary.providers.codex.limits[1].leftPercent, 6);
-  assert.equal(summary.providers.codex.cost.latestTokens, 1050);
-  assert.equal(summary.providers.codex.cost.thirtyDayCostNanos, 2500000000);
+  assert.equal(summary.providers.codex.limits[0].source, "codex-events");
+  assert.equal(summary.providers.codex.tokens.total, 1050);
 
   const focused = renderKeySvg(summary, "codex");
   const combined = renderKeySvg(summary, "combined");
@@ -295,66 +271,104 @@ test("collectUsage reads CodexBar session and weekly limits", () => {
   assert.notEqual(focused, combined);
 });
 
-test("renderKeySvg supports single-purpose display modes", () => {
-  const root = makeTempDir();
-  const now = new Date("2026-06-10T15:40:00Z");
-  const historyPath = path.join(root, "history");
-  const costPath = path.join(root, "cost");
+test("parseClaudeUsageText reads Claude Code /usage quota output", () => {
+  const now = new Date("2026-06-12T02:45:00Z");
+  const text = [
+    "You are currently using your subscription to power your Claude Code usage",
+    "",
+    "Current session: 91% used · resets Jun 12 at 12:29pm (Asia/Shanghai)",
+    "Current week (all models): 44% used · resets Jun 15 at 6pm (Asia/Shanghai)",
+    "Current week (Sonnet only): 6% used · resets Jun 15 at 5:59pm (Asia/Shanghai)"
+  ].join("\n");
 
-  fs.mkdirSync(historyPath, { recursive: true });
-  fs.writeFileSync(path.join(historyPath, "codex.json"), JSON.stringify({
-    accounts: {
-      account: [
-        {
-          name: "session",
-          windowMinutes: 300,
-          entries: [{ capturedAt: now.toISOString(), resetsAt: "2026-06-10T17:30:43Z", usedPercent: 38 }]
-        },
-        {
-          name: "weekly",
-          windowMinutes: 10080,
-          entries: [{ capturedAt: now.toISOString(), resetsAt: "2026-06-11T01:00:23Z", usedPercent: 94 }]
-        }
-      ]
-    }
-  }));
-  fs.writeFileSync(path.join(historyPath, "claude.json"), JSON.stringify({
-    accounts: {
-      account: [
-        {
-          name: "session",
-          windowMinutes: 300,
-          entries: [{ capturedAt: now.toISOString(), resetsAt: "2026-06-10T16:00:00Z", usedPercent: 71 }]
-        },
-        {
-          name: "weekly",
-          windowMinutes: 10080,
-          entries: [{ capturedAt: now.toISOString(), resetsAt: "2026-06-15T10:00:00Z", usedPercent: 21 }]
-        },
-        {
-          name: "opus",
-          windowMinutes: 10080,
-          entries: [{ capturedAt: now.toISOString(), resetsAt: "2026-06-15T10:00:00Z", usedPercent: 2 }]
-        }
-      ]
-    }
-  }));
-  fs.mkdirSync(costPath, { recursive: true });
-  fs.writeFileSync(path.join(costPath, "codex-v8.json"), JSON.stringify({
-    days: { "2026-06-10": { "gpt-5.5": [1000, 0, 50] } },
-    files: { file: { codexCostNanos: { "2026-06-10": { "gpt-5.5": 2500000000 } } } }
-  }));
-  fs.writeFileSync(path.join(costPath, "claude-v2.json"), JSON.stringify({
-    days: { "2026-06-10": { "claude-sonnet-4-6": [100, 0, 20, 30, 500000000] } },
-    files: {}
-  }));
+  const limits = parseClaudeUsageText(text, now);
+  assert.equal(limits.length, 3);
+
+  assert.equal(limits[0].name, "session");
+  assert.equal(limits[0].usedPercent, 91);
+  assert.equal(limits[0].leftPercent, 9);
+  assert.equal(limits[0].windowMinutes, 300);
+  assert.equal(limits[0].source, "claude-cli");
+
+  assert.equal(limits[1].name, "weekly");
+  assert.equal(limits[1].usedPercent, 44);
+  assert.equal(limits[1].leftPercent, 56);
+  assert.equal(limits[1].windowMinutes, 10080);
+
+  assert.equal(limits[2].name, "sonnet");
+  assert.equal(limits[2].usedPercent, 6);
+  assert.equal(limits[2].leftPercent, 94);
+  assert.equal(limits[2].label, "Sonnet");
+});
+
+test("collectUsage attaches Claude Code CLI /usage limits", () => {
+  const root = makeTempDir();
+  const now = new Date("2026-06-12T02:45:00Z");
+  const claudePath = path.join(root, ".claude", "projects");
+  fs.mkdirSync(claudePath, { recursive: true });
+
+  const command = path.join(root, "fake-claude");
+  fs.writeFileSync(command, [
+    "#!/bin/sh",
+    "cat <<'OUT'",
+    "You are currently using your subscription to power your Claude Code usage",
+    "",
+    "Current session: 91% used · resets Jun 12 at 12:29pm (Asia/Shanghai)",
+    "Current week (all models): 44% used · resets Jun 15 at 6pm (Asia/Shanghai)",
+    "Current week (Sonnet only): 6% used · resets Jun 15 at 5:59pm (Asia/Shanghai)",
+    "OUT"
+  ].join("\n"));
+  fs.chmodSync(command, 0o755);
 
   const summary = collectUsage({
     codexPath: path.join(root, ".codex"),
+    claudePath,
+    claudeUsageCommand: command,
+    maxFiles: 100
+  }, now);
+
+  assert.equal(summary.providers.claude.limits[0].name, "session");
+  assert.equal(summary.providers.claude.limits[0].leftPercent, 9);
+  assert.equal(summary.providers.claude.limits[1].name, "weekly");
+  assert.equal(summary.providers.claude.limits[1].leftPercent, 56);
+  assert.equal(summary.providers.claude.limits[2].name, "sonnet");
+  assert.equal(summary.providers.claude.limits[2].leftPercent, 94);
+
+  const sonnetSvg = renderKeySvg(summary, "claude-sonnet");
+  assert.match(sonnetSvg, /Claude Sonnet/);
+  assert.match(sonnetSvg, /94%/);
+});
+
+test("renderKeySvg supports single-purpose display modes", () => {
+  const root = makeTempDir();
+  const now = new Date("2026-06-10T15:40:00Z");
+  const codexPath = path.join(root, ".codex");
+
+  writeJsonl(path.join(codexPath, "sessions", "2026", "06", "10", "codex.jsonl"), [
+    {
+      timestamp: now.toISOString(),
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: {
+            input_tokens: 1000,
+            output_tokens: 50,
+            total_tokens: 1050
+          }
+        }
+      },
+      rate_limits: {
+        primary: { used_percent: 38, window_minutes: 300, resets_at: "2026-06-10T17:30:43Z" },
+        secondary: { used_percent: 94, window_minutes: 10080, resets_at: "2026-06-11T01:00:23Z" }
+      }
+    }
+  ]);
+
+  const summary = collectUsage({
+    codexPath,
     claudePath: path.join(root, ".claude"),
-    codexBarHistoryPath: historyPath,
-    codexBarCostPath: costPath,
-    useCodexBarData: true,
+    claudeUsageCommand: "",
     maxFiles: 100
   }, now);
 
@@ -422,7 +436,7 @@ test("collectUsage summarizes active agent sessions and human-input waits", () =
   const summary = collectUsage({
     codexPath,
     claudePath,
-    useCodexBarData: false,
+    claudeUsageCommand: "",
     windowDays: 7,
     sessionLookbackHours: 24,
     activeSessionMinutes: 30,
@@ -482,7 +496,7 @@ test("collectUsage does not count stale or archived sessions as needing input", 
   const summary = collectUsage({
     codexPath,
     claudePath,
-    useCodexBarData: false,
+    claudeUsageCommand: "",
     windowDays: 7,
     sessionLookbackHours: 24,
     activeSessionMinutes: 30,
@@ -552,7 +566,7 @@ test("collectUsage keeps newest Claude session status when subagent files share 
   const summary = collectUsage({
     codexPath: path.join(root, ".codex"),
     claudePath,
-    useCodexBarData: false,
+    claudeUsageCommand: "",
     includeClaudeSubagents: true,
     windowDays: 7,
     sessionLookbackHours: 24,

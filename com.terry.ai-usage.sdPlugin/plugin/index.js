@@ -14,10 +14,30 @@ const {
 const { parseLaunchArgs, StreamDockConnection } = require("./lib/streamdock");
 
 const ACTION_UUID = "com.terry.ai-usage.summary";
+const SHARED_SETTING_KEYS = Object.freeze([
+  "windowDays",
+  "refreshSeconds",
+  "sessionLookbackHours",
+  "activeSessionMinutes",
+  "codexPath",
+  "claudePath",
+  "claudeUsageCommand",
+  "claudeUsageTimeoutMs",
+  "includeClaudeSubagents",
+  "maxFiles"
+]);
+
 const contexts = new Map();
 const visibleInspectors = new Set();
 
 let connection = null;
+let sharedSummary = null;
+let sharedSettings = null;
+let sharedEffectiveRefreshSeconds = null;
+let sharedRefreshing = false;
+let sharedNeedsRefresh = false;
+let sharedTimer = null;
+let sharedRefreshDebounce = null;
 
 function log(level, ...parts) {
   const line = `${new Date().toISOString()} [${level}] ${parts.map((part) => {
@@ -78,12 +98,21 @@ function compactSummary(summary) {
   };
 }
 
+function sharedInspectorState() {
+  return {
+    contextCount: contexts.size,
+    effectiveRefreshSeconds: sharedEffectiveRefreshSeconds,
+    sourceSettings: sharedSettings
+  };
+}
+
 function sendInspectorUpdate(context, state, summary) {
   if (!connection || !visibleInspectors.has(context)) return;
   connection.sendToPropertyInspector(state.action || ACTION_UUID, context, {
     type: "summary",
     settings: state.settings,
-    summary: compactSummary(summary)
+    summary: compactSummary(summary),
+    shared: sharedInspectorState()
   });
 }
 
@@ -96,51 +125,132 @@ function setKeyError(context, error) {
   connection.showAlert(context);
 }
 
-function refreshContext(context, reason = "timer") {
-  const state = contexts.get(context);
-  if (!state) return;
-  if (state.refreshing) {
-    state.needsRefresh = true;
-    return;
-  }
+function sourceSettingsFrom(state) {
+  const settings = normalizeSettings(state && state.settings ? state.settings : {});
+  return {
+    ...settings,
+    displayMode: "combined"
+  };
+}
 
-  state.refreshing = true;
-  state.needsRefresh = false;
+function currentSourceSettings() {
+  if (sharedSettings) return sourceSettingsFrom({ settings: sharedSettings });
+  const fastest = [...contexts.values()]
+    .sort((a, b) => a.settings.refreshSeconds - b.settings.refreshSeconds)[0];
+  if (!fastest) return normalizeSettings({});
+  return sourceSettingsFrom(fastest);
+}
+
+function mergeSharedSettings(targetSettings, sourceSettings) {
+  const target = normalizeSettings(targetSettings || {});
+  const source = normalizeSettings(sourceSettings || {});
+  for (const key of SHARED_SETTING_KEYS) target[key] = source[key];
+  return target;
+}
+
+function propagateSharedSettings(sourceSettings, sourceContext = null) {
+  sharedSettings = sourceSettingsFrom({ settings: sourceSettings });
+  for (const [context, state] of contexts.entries()) {
+    const displayMode = state.settings.displayMode;
+    state.settings = mergeSharedSettings({ ...state.settings, displayMode }, sharedSettings);
+    if (connection && context !== sourceContext) connection.setSettings(context, state.settings);
+    if (sharedSummary) sendInspectorUpdate(context, state, sharedSummary);
+  }
+}
+
+function renderContext(context, summary = sharedSummary) {
+  const state = contexts.get(context);
+  if (!state || !summary || !connection) return;
   try {
-    const summary = collectUsage(state.settings);
     state.lastSummary = summary;
     const svg = renderKeySvg(summary, state.settings.displayMode);
     connection.setImage(context, svgDataUri(svg));
     connection.setTitle(context, titleForSummary(summary, state.settings.displayMode));
     sendInspectorUpdate(context, state, summary);
-    log("info", "refreshed", context, reason, {
-      codex: summary.providers.codex.tokens.total,
-      claude: summary.providers.claude.tokens.total,
-      errors: summary.total.errors
-    });
   } catch (error) {
     setKeyError(context, error);
+  }
+}
+
+function renderAllContexts(summary = sharedSummary) {
+  for (const context of contexts.keys()) renderContext(context, summary);
+}
+
+function mergeLastGoodLimits(summary, previousSummary) {
+  if (!summary || !previousSummary) return summary;
+  const generatedAt = Date.parse(summary.generatedAt);
+
+  for (const providerName of ["codex", "claude"]) {
+    const provider = summary.providers && summary.providers[providerName];
+    const previousProvider = previousSummary.providers && previousSummary.providers[providerName];
+    if (!provider || !previousProvider) continue;
+    if (provider.limits.length || !previousProvider.limits.length || !provider.errors) continue;
+
+    provider.limits = previousProvider.limits.filter((limit) => {
+      if (!limit.resetsAt || !Number.isFinite(generatedAt)) return true;
+      const resetsAt = Date.parse(limit.resetsAt);
+      return !Number.isFinite(resetsAt) || resetsAt > generatedAt;
+    });
+  }
+
+  return summary;
+}
+
+function refreshShared(reason = "timer") {
+  if (!contexts.size) return;
+  if (sharedRefreshing) {
+    sharedNeedsRefresh = true;
+    return;
+  }
+
+  sharedRefreshing = true;
+  sharedNeedsRefresh = false;
+  sharedSettings = currentSourceSettings();
+  try {
+    const summary = mergeLastGoodLimits(collectUsage(sharedSettings), sharedSummary);
+    sharedSummary = summary;
+    renderAllContexts(summary);
+    log("info", "refreshed shared", reason, {
+      contexts: contexts.size,
+      codex: summary.providers.codex.tokens.total,
+      codexLimits: summary.providers.codex.limits.length,
+      claude: summary.providers.claude.tokens.total,
+      claudeLimits: summary.providers.claude.limits.length,
+      errors: summary.total.errors,
+      errorMessages: [
+        ...(summary.providers.codex.errorMessages || []),
+        ...(summary.providers.claude.errorMessages || [])
+      ].slice(0, 3)
+    });
+  } catch (error) {
+    for (const context of contexts.keys()) setKeyError(context, error);
   } finally {
-    state.refreshing = false;
-    if (state.needsRefresh) {
-      setTimeout(() => refreshContext(context, "queued"), 250);
-    }
+    sharedRefreshing = false;
+    if (sharedNeedsRefresh) setTimeout(() => refreshShared("queued"), 250);
   }
 }
 
-function clearTimer(state) {
-  if (state && state.timer) {
-    clearInterval(state.timer);
-    state.timer = null;
-  }
+function requestSharedRefresh(reason = "requested", delayMs = 750) {
+  if (sharedRefreshDebounce) clearTimeout(sharedRefreshDebounce);
+  sharedRefreshDebounce = setTimeout(() => {
+    sharedRefreshDebounce = null;
+    refreshShared(reason);
+  }, delayMs);
 }
 
-function scheduleContext(context) {
-  const state = contexts.get(context);
-  if (!state) return;
-  clearTimer(state);
-  const refreshMs = Math.max(10, state.settings.refreshSeconds) * 1000;
-  state.timer = setInterval(() => refreshContext(context, "interval"), refreshMs);
+function clearSharedTimer() {
+  if (!sharedTimer) return;
+  clearInterval(sharedTimer);
+  sharedTimer = null;
+}
+
+function scheduleSharedRefresh() {
+  clearSharedTimer();
+  if (!contexts.size) return;
+  const refreshSeconds = Math.min(...[...contexts.values()].map((state) => state.settings.refreshSeconds));
+  sharedEffectiveRefreshSeconds = refreshSeconds;
+  const refreshMs = Math.max(10, refreshSeconds) * 1000;
+  sharedTimer = setInterval(() => refreshShared("interval"), refreshMs);
 }
 
 function upsertContext(data) {
@@ -150,22 +260,25 @@ function upsertContext(data) {
   const state = {
     ...existing,
     action: data.action || existing.action || ACTION_UUID,
-    settings,
-    refreshing: false,
-    needsRefresh: false
+    settings
   };
   contexts.set(context, state);
-  scheduleContext(context);
-  refreshContext(context, "willAppear");
+  if (!sharedSettings) sharedSettings = sourceSettingsFrom(state);
+  state.settings = mergeSharedSettings(state.settings, sharedSettings);
+  scheduleSharedRefresh();
+  if (sharedSummary) renderContext(context, sharedSummary);
+  requestSharedRefresh("willAppear");
 }
 
 function updateSettings(data) {
   const context = data.context;
   const state = contexts.get(context);
   if (!state) return;
-  state.settings = normalizeSettings(settingsPayload(data));
-  scheduleContext(context);
-  refreshContext(context, "settings");
+  const nextSettings = normalizeSettings(settingsPayload(data));
+  state.settings = nextSettings;
+  propagateSharedSettings(nextSettings, context);
+  scheduleSharedRefresh();
+  requestSharedRefresh("settings", 250);
 }
 
 function handleInspectorCommand(data) {
@@ -175,14 +288,16 @@ function handleInspectorCommand(data) {
 
   if (payload.type === "settings") {
     const state = contexts.get(context);
-    state.settings = normalizeSettings(payload.settings || {});
-    scheduleContext(context);
-    refreshContext(context, "propertyInspectorSettings");
+    const nextSettings = normalizeSettings(payload.settings || {});
+    state.settings = nextSettings;
+    propagateSharedSettings(nextSettings, context);
+    scheduleSharedRefresh();
+    requestSharedRefresh("propertyInspectorSettings", 250);
     return;
   }
 
   if (payload.type === "refresh") {
-    refreshContext(context, "propertyInspector");
+    refreshShared("propertyInspector");
   }
 }
 
@@ -195,14 +310,13 @@ function handleMessage(data) {
       updateSettings(data);
       break;
     case "keyUp":
-      refreshContext(data.context, "keyUp");
+      refreshShared("keyUp");
       connection.showOk(data.context);
       break;
     case "willDisappear": {
-      const state = contexts.get(data.context);
-      clearTimer(state);
       contexts.delete(data.context);
       visibleInspectors.delete(data.context);
+      scheduleSharedRefresh();
       break;
     }
     case "propertyInspectorDidAppear": {
@@ -219,7 +333,7 @@ function handleMessage(data) {
       break;
     case "systemDidWakeUp":
     case "deviceDidConnect":
-      for (const context of contexts.keys()) refreshContext(context, data.event);
+      requestSharedRefresh(data.event, 250);
       break;
     default:
       break;
@@ -256,7 +370,8 @@ function main() {
     error: (error) => log("error", error),
     close: () => {
       log("info", "connection closed");
-      for (const state of contexts.values()) clearTimer(state);
+      if (sharedRefreshDebounce) clearTimeout(sharedRefreshDebounce);
+      clearSharedTimer();
       process.exit(0);
     }
   });
