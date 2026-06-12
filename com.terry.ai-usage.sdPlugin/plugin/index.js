@@ -80,13 +80,15 @@ function readLimitCache() {
 
 function writeLimitCache(summary) {
   if (!summary || !summary.providers) return;
-  const providers = {};
+  const providers = { ...((cachedLimitSummary && cachedLimitSummary.providers) || {}) };
+  let changed = false;
   for (const providerName of ["codex", "claude"]) {
     const provider = summary.providers[providerName];
     if (!provider || provider.errors || !provider.limits.length) continue;
     providers[providerName] = { limits: provider.limits };
+    changed = true;
   }
-  if (!Object.keys(providers).length) return;
+  if (!changed || !Object.keys(providers).length) return;
 
   cachedLimitSummary = {
     generatedAt: summary.generatedAt,
@@ -235,6 +237,20 @@ function rollForwardResetSession(limit, generatedAt) {
   };
 }
 
+function limitSortValue(name) {
+  if (name === "session") return 0;
+  if (name === "weekly") return 1;
+  return 2;
+}
+
+function reusablePreviousLimit(providerName, limit, generatedAt) {
+  if (!limit) return null;
+  if (!limit.resetsAt || !Number.isFinite(generatedAt)) return limit;
+  const resetsAt = Date.parse(limit.resetsAt);
+  if (!Number.isFinite(resetsAt) || resetsAt > generatedAt) return limit;
+  return providerName === "claude" ? rollForwardResetSession(limit, generatedAt) : null;
+}
+
 function mergeLastGoodLimits(summary, previousSummary) {
   if (!summary || !previousSummary) return summary;
   const generatedAt = Date.parse(summary.generatedAt);
@@ -243,15 +259,15 @@ function mergeLastGoodLimits(summary, previousSummary) {
     const provider = summary.providers && summary.providers[providerName];
     const previousProvider = previousSummary.providers && previousSummary.providers[providerName];
     if (!provider || !previousProvider) continue;
-    if (provider.limits.length || !previousProvider.limits.length || !provider.errors) continue;
+    if (!previousProvider.limits.length || !provider.errors) continue;
 
-    provider.limits = previousProvider.limits.flatMap((limit) => {
-      if (!limit.resetsAt || !Number.isFinite(generatedAt)) return [limit];
-      const resetsAt = Date.parse(limit.resetsAt);
-      if (!Number.isFinite(resetsAt) || resetsAt > generatedAt) return [limit];
-      const rolledForward = providerName === "claude" ? rollForwardResetSession(limit, generatedAt) : null;
-      return rolledForward ? [rolledForward] : [];
-    });
+    const merged = new Map(provider.limits.map((limit) => [limit.name, limit]));
+    for (const previousLimit of previousProvider.limits) {
+      if (merged.has(previousLimit.name)) continue;
+      const reusableLimit = reusablePreviousLimit(providerName, previousLimit, generatedAt);
+      if (reusableLimit) merged.set(reusableLimit.name, reusableLimit);
+    }
+    provider.limits = [...merged.values()].sort((a, b) => limitSortValue(a.name) - limitSortValue(b.name));
   }
 
   return summary;
