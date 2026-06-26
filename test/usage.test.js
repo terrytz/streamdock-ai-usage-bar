@@ -8,6 +8,7 @@ const test = require("node:test");
 
 const {
   collectUsage,
+  parseClaudeUsageDetails,
   parseClaudeUsageText,
   renderKeySvg,
   shortNumber,
@@ -301,6 +302,32 @@ test("parseClaudeUsageText reads Claude Code /usage quota output", () => {
   assert.equal(limits[2].label, "Sonnet");
 });
 
+test("parseClaudeUsageDetails reads Claude Code current usage contribution output", () => {
+  const now = new Date("2026-06-26T09:18:00Z");
+  const text = [
+    "You are currently using your subscription to power your Claude Code usage",
+    "",
+    "What's contributing to your limits usage?",
+    "Approximate, based on local sessions on this machine - does not include other devices or claude.ai. Behaviors are independent characteristics, not a breakdown.",
+    "",
+    "Last 24h · 1067 requests · 4 sessions",
+    "  97% of your usage came from subagent-heavy sessions",
+    "",
+    "Last 7d · 4,777 requests · 27 sessions",
+    "  98% of your usage came from subagent-heavy sessions"
+  ].join("\n");
+
+  const details = parseClaudeUsageDetails(text, now);
+  assert.equal(details.limits.length, 0);
+  assert.equal(details.usageWindows.length, 2);
+  assert.deepEqual(details.usageWindows.map((window) => window.period), ["24h", "7d"]);
+  assert.equal(details.usageWindows[0].requests, 1067);
+  assert.equal(details.usageWindows[0].sessions, 4);
+  assert.equal(details.usageWindows[1].requests, 4777);
+  assert.equal(details.usageWindows[1].sessions, 27);
+  assert.equal(details.usageWindows[1].source, "claude-cli-usage");
+});
+
 test("collectUsage attaches Claude Code CLI /usage limits", () => {
   const root = makeTempDir();
   const now = new Date("2026-06-12T02:45:00Z");
@@ -369,6 +396,50 @@ test("collectUsage keeps Claude session visible when /usage returns subscription
   const svg = renderKeySvg(summary, "claude-session");
   assert.match(svg, /100%/);
   assert.match(svg, /0% used/);
+});
+
+test("collectUsage renders Claude current /usage windows when quota percents are absent", () => {
+  const root = makeTempDir();
+  const now = new Date("2026-06-26T09:18:00Z");
+  const claudePath = path.join(root, ".claude", "projects");
+  fs.mkdirSync(claudePath, { recursive: true });
+
+  const command = path.join(root, "fake-claude-current-usage");
+  fs.writeFileSync(command, [
+    "#!/bin/sh",
+    "cat <<'OUT'",
+    "You are currently using your subscription to power your Claude Code usage",
+    "",
+    "What's contributing to your limits usage?",
+    "Approximate, based on local sessions on this machine - does not include other devices or claude.ai. Behaviors are independent characteristics, not a breakdown.",
+    "",
+    "Last 24h · 1067 requests · 4 sessions",
+    "  97% of your usage came from subagent-heavy sessions",
+    "",
+    "Last 7d · 4,777 requests · 27 sessions",
+    "  98% of your usage came from subagent-heavy sessions",
+    "OUT"
+  ].join("\n"));
+  fs.chmodSync(command, 0o755);
+
+  const summary = collectUsage({
+    codexPath: path.join(root, ".codex"),
+    claudePath,
+    claudeUsageCommand: command,
+    maxFiles: 100
+  }, now);
+
+  assert.equal(summary.providers.claude.errors, 0);
+  assert.equal(summary.providers.claude.limits.length, 0);
+  assert.equal(summary.providers.claude.usageWindows.length, 2);
+
+  const weeklySvg = renderKeySvg(summary, "claude-weekly");
+  assert.match(weeklySvg, /Claude 7d Usage/);
+  assert.match(weeklySvg, /4\.8K/);
+  assert.match(weeklySvg, /27 sessions/);
+
+  const combinedSvg = renderKeySvg(summary, "combined");
+  assert.match(combinedSvg, /7d 4\.8K/);
 });
 
 test("renderKeySvg supports single-purpose display modes", () => {

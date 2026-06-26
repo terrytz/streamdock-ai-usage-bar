@@ -186,6 +186,7 @@ function emptyProvider(name) {
     tokens: emptyTokens(),
     limits: [],
     cost: emptyCost(),
+    usageWindows: [],
     requests: 0,
     messages: 0,
     turns: 0,
@@ -449,6 +450,54 @@ function upsertLimit(stats, limit) {
   stats.limits.sort((a, b) => limitSortValue(a.name) - limitSortValue(b.name) || a.label.localeCompare(b.label));
 }
 
+function usageWindowSortValue(period) {
+  if (period === "24h") return 0;
+  if (period === "7d") return 1;
+  return 2;
+}
+
+function parseCountText(value) {
+  const number = Number(String(value || "").replace(/,/g, ""));
+  return Number.isFinite(number) ? number : 0;
+}
+
+function displayUsageWindowLabel(period) {
+  if (period === "24h") return "Last 24h";
+  if (period === "7d") return "Last 7d";
+  return titleCase(period);
+}
+
+function makeUsageWindow(period, data, source, capturedAt = null) {
+  if (!period || !data || typeof data !== "object") return null;
+  const requests = parseCountText(data.requests);
+  const sessions = parseCountText(data.sessions);
+  if (!requests && !sessions) return null;
+  const normalizedPeriod = String(period).toLowerCase();
+  return {
+    period: normalizedPeriod,
+    label: displayUsageWindowLabel(normalizedPeriod),
+    requests,
+    sessions,
+    capturedAt: resetIsoFrom(capturedAt ?? data.capturedAt ?? data.captured_at),
+    source
+  };
+}
+
+function upsertUsageWindow(stats, usageWindow) {
+  if (!usageWindow) return;
+  if (!Array.isArray(stats.usageWindows)) stats.usageWindows = [];
+  const existingIndex = stats.usageWindows.findIndex((candidate) => candidate.period === usageWindow.period);
+  if (existingIndex === -1) {
+    stats.usageWindows.push(usageWindow);
+  } else {
+    const existing = stats.usageWindows[existingIndex];
+    const existingCaptured = existing.capturedAt ? new Date(existing.capturedAt).getTime() : 0;
+    const nextCaptured = usageWindow.capturedAt ? new Date(usageWindow.capturedAt).getTime() : 0;
+    if (nextCaptured >= existingCaptured) stats.usageWindows[existingIndex] = usageWindow;
+  }
+  stats.usageWindows.sort((a, b) => usageWindowSortValue(a.period) - usageWindowSortValue(b.period));
+}
+
 function collectRecordLimits(provider, record, stats) {
   if (provider !== "codex") return;
   const rateLimits = record && (record.rate_limits || (record.payload && record.payload.rate_limits));
@@ -506,27 +555,99 @@ function resetIsoFromClaudeUsageLabel(label, now = new Date()) {
   return date.toISOString();
 }
 
-function parseClaudeUsageText(text, now = new Date()) {
+function parseClaudeUsageDetails(text, now = new Date()) {
   const limits = [];
+  const usageWindows = [];
   const linePattern = /^Current\s+(session|week\s+\(all models\)|week\s+\(Sonnet only\)):\s+(\d+(?:\.\d+)?)%\s+used(?:\s+·\s+resets\s+(.+))?$/i;
+  const usageWindowPattern = /^Last\s+(24h|7d)\s+·\s+([\d,]+)\s+requests?\s+·\s+([\d,]+)\s+sessions?\b/i;
 
   for (const rawLine of String(text || "").split(/\r?\n/)) {
     const line = rawLine.trim();
     const match = line.match(linePattern);
-    if (!match) continue;
+    if (match) {
+      const label = match[1].toLowerCase();
+      const name = label === "session" ? "session" : label.includes("sonnet") ? "sonnet" : "weekly";
+      const windowMinutes = name === "session" ? 300 : 10080;
+      upsertLimit({ limits }, makeLimit(name, {
+        usedPercent: Number(match[2]),
+        windowMinutes,
+        resetsAt: resetIsoFromClaudeUsageLabel(match[3], now),
+        capturedAt: now.toISOString()
+      }, "claude-cli", now));
+      continue;
+    }
 
-    const label = match[1].toLowerCase();
-    const name = label === "session" ? "session" : label.includes("sonnet") ? "sonnet" : "weekly";
-    const windowMinutes = name === "session" ? 300 : 10080;
-    upsertLimit({ limits }, makeLimit(name, {
-      usedPercent: Number(match[2]),
-      windowMinutes,
-      resetsAt: resetIsoFromClaudeUsageLabel(match[3], now),
+    const usageMatch = line.match(usageWindowPattern);
+    if (!usageMatch) continue;
+    upsertUsageWindow({ usageWindows }, makeUsageWindow(usageMatch[1], {
+      requests: usageMatch[2],
+      sessions: usageMatch[3],
       capturedAt: now.toISOString()
-    }, "claude-cli", now));
+    }, "claude-cli-usage", now));
   }
 
-  return limits;
+  return {
+    limits,
+    usageWindows
+  };
+}
+
+function parseClaudeUsageText(text, now = new Date()) {
+  return parseClaudeUsageDetails(text, now).limits;
+}
+
+function addUsageWindows(stats, usageWindows) {
+  for (const usageWindow of usageWindows || []) upsertUsageWindow(stats, usageWindow);
+}
+
+function usageWindowFor(provider, period) {
+  return provider && Array.isArray(provider.usageWindows)
+    ? provider.usageWindows.find((usageWindow) => usageWindow.period === period)
+    : null;
+}
+
+function compactUsageWindowValue(usageWindow) {
+  if (!usageWindow) return "-";
+  if (usageWindow.requests) return shortNumber(usageWindow.requests);
+  if (usageWindow.sessions) return `${shortNumber(usageWindow.sessions)} sess`;
+  return "-";
+}
+
+function usageWindowSubtitle(usageWindow) {
+  if (!usageWindow) return "";
+  if (usageWindow.requests && usageWindow.sessions) {
+    return `${shortNumber(usageWindow.requests)} req, ${shortNumber(usageWindow.sessions)} sessions`;
+  }
+  if (usageWindow.requests) return `${shortNumber(usageWindow.requests)} requests`;
+  if (usageWindow.sessions) return `${shortNumber(usageWindow.sessions)} sessions`;
+  return "";
+}
+
+function usageWindowFooter(usageWindow) {
+  if (!usageWindow) return "";
+  return usageWindow.source === "claude-cli-usage" ? "from claude /usage" : usageWindow.source || "";
+}
+
+function usageWindowRequestsDisplay(usageWindow) {
+  if (!usageWindow) return "No usage";
+  if (usageWindow.requests) return `${shortNumber(usageWindow.requests)} req`;
+  if (usageWindow.sessions) return `${shortNumber(usageWindow.sessions)} sess`;
+  return "No usage";
+}
+
+function titleForUsageWindow(providerName, usageWindow) {
+  const providerLabel = providerName === "codex" ? "Codex" : "Claude";
+  return `${providerLabel} ${usageWindow ? usageWindow.label.replace(/^Last\s+/i, "") : "Usage"} Usage`;
+}
+
+function fallbackUsageWindowForLimit(provider, limitName) {
+  if (limitName === "session") return usageWindowFor(provider, "24h");
+  if (limitName === "weekly") return usageWindowFor(provider, "7d");
+  return null;
+}
+
+function providerUsageFallback(provider) {
+  return usageWindowFor(provider, "7d") || usageWindowFor(provider, "24h");
 }
 
 function collectClaudeCliLimits(settings, stats, now = new Date()) {
@@ -565,9 +686,12 @@ function collectClaudeCliLimits(settings, stats, now = new Date()) {
     return;
   }
 
-  const limits = parseClaudeUsageText(output, now);
+  const details = parseClaudeUsageDetails(output, now);
+  addUsageWindows(stats, details.usageWindows);
+  const limits = details.limits;
   if (!limits.length) {
     const preview = output.replace(/\s+/g, " ").trim().slice(0, 120);
+    if (details.usageWindows.length) return;
     if (/using your subscription to power your Claude Code usage/i.test(output)) {
       upsertLimit(stats, makeLimit("session", {
         usedPercent: 0,
@@ -1042,6 +1166,8 @@ function providerDisplay(provider) {
   const weekly = limitFor(provider, "weekly");
   if (session && weekly) return `S${session.leftPercent}% W${weekly.leftPercent}%`;
   if (session) return `${session.leftPercent}% left`;
+  const usageFallback = providerUsageFallback(provider);
+  if (usageFallback) return usageWindowRequestsDisplay(usageFallback);
   if (provider.tokens.total > 0) return shortNumber(provider.tokens.total);
   if (provider.turns > 0) return `${shortNumber(provider.turns)} turns`;
   if (provider.requests > 0) return `${shortNumber(provider.requests)} req`;
@@ -1088,7 +1214,9 @@ function focusedMainDisplay(provider) {
 
 function singleLimitDisplay(provider, name) {
   const limit = limitFor(provider, name);
-  return limit ? `${limit.leftPercent}% left` : "No quota";
+  if (limit) return `${limit.leftPercent}% left`;
+  const usageWindow = fallbackUsageWindowForLimit(provider, name);
+  return usageWindow ? usageWindowRequestsDisplay(usageWindow) : "No quota";
 }
 
 function escapeXml(value) {
@@ -1180,11 +1308,35 @@ function limitLineSvg(limit, y, color, now) {
   <text x="18" y="${y + 27}" font-family="Arial, sans-serif" font-size="8" fill="#9aa7b5">${escapeXml(reset || reserve)}</text>`;
 }
 
+function usageWindowLineSvg(usageWindow, y, color) {
+  const label = usageWindow ? usageWindow.label : "No usage data";
+  const value = usageWindow ? compactUsageWindowValue(usageWindow) : "-";
+  const subtitle = usageWindowSubtitle(usageWindow);
+  return `
+  <text x="18" y="${y}" font-family="Arial, sans-serif" font-size="10" font-weight="700" fill="#f8fafc">${escapeXml(label)}</text>
+  <text x="126" y="${y}" text-anchor="end" font-family="Arial, sans-serif" font-size="14" font-weight="700" fill="${color}">${escapeXml(value)}</text>
+  <rect x="18" y="${y + 7}" width="108" height="8" rx="4" fill="#2a3440"/>
+  <rect x="18" y="${y + 7}" width="${usageWindow ? 94 : 0}" height="8" rx="4" fill="${color}" opacity="0.55"/>
+  <text x="18" y="${y + 27}" font-family="Arial, sans-serif" font-size="8" fill="#9aa7b5">${escapeXml(subtitle)}</text>`;
+}
+
+function limitOrUsageLineSvg(provider, limitName, y, color, now) {
+  const limit = limitFor(provider, limitName);
+  if (limit) return limitLineSvg(limit, y, color, now);
+  const usageWindow = fallbackUsageWindowForLimit(provider, limitName);
+  if (usageWindow) return usageWindowLineSvg(usageWindow, y, color);
+  return limitLineSvg(null, y, color, now);
+}
+
 function combinedProviderSvg(provider, label, y, color, now) {
   const session = limitFor(provider, "session");
   const weekly = limitFor(provider, "weekly");
-  const sessionLeft = session ? `${session.leftPercent}%` : "-";
-  const weeklyLeft = weekly ? `${weekly.leftPercent}%` : "-";
+  const sessionUsage = fallbackUsageWindowForLimit(provider, "session");
+  const weeklyUsage = fallbackUsageWindowForLimit(provider, "weekly");
+  const sessionLeft = session ? `${session.leftPercent}%` : sessionUsage ? compactUsageWindowValue(sessionUsage) : "-";
+  const weeklyLeft = weekly ? `${weekly.leftPercent}%` : weeklyUsage ? compactUsageWindowValue(weeklyUsage) : "-";
+  const sessionPrefix = session ? "S" : sessionUsage ? "24h" : "S";
+  const weeklyPrefix = weekly ? "W" : weeklyUsage ? "7d" : "W";
   const sessionWidth = session ? Math.max(2, Math.round((session.leftPercent / 100) * 43)) : 0;
   const weeklyWidth = weekly ? Math.max(2, Math.round((weekly.leftPercent / 100) * 43)) : 0;
   const sessionColor = percentColor(session && session.leftPercent, color);
@@ -1192,14 +1344,14 @@ function combinedProviderSvg(provider, label, y, color, now) {
 
   return `
   <text x="18" y="${y}" font-family="Arial, sans-serif" font-size="12" font-weight="700" fill="#f8fafc">${escapeXml(label)}</text>
-  <text x="68" y="${y}" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="700" fill="${sessionColor}">S ${escapeXml(sessionLeft)}</text>
-  <text x="126" y="${y}" text-anchor="end" font-family="Arial, sans-serif" font-size="12" font-weight="700" fill="${weeklyColor}">W ${escapeXml(weeklyLeft)}</text>
+  <text x="68" y="${y}" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="700" fill="${sessionColor}">${escapeXml(sessionPrefix)} ${escapeXml(sessionLeft)}</text>
+  <text x="126" y="${y}" text-anchor="end" font-family="Arial, sans-serif" font-size="12" font-weight="700" fill="${weeklyColor}">${escapeXml(weeklyPrefix)} ${escapeXml(weeklyLeft)}</text>
   <rect x="18" y="${y + 8}" width="50" height="7" rx="3.5" fill="#2a3440"/>
-  <rect x="18" y="${y + 8}" width="${sessionWidth}" height="7" rx="3.5" fill="${sessionColor}"/>
+  <rect x="18" y="${y + 8}" width="${session ? sessionWidth : sessionUsage ? 43 : 0}" height="7" rx="3.5" fill="${sessionColor}" opacity="${session ? 1 : 0.55}"/>
   <rect x="76" y="${y + 8}" width="50" height="7" rx="3.5" fill="#2a3440"/>
-  <rect x="76" y="${y + 8}" width="${Math.max(0, Math.round((weeklyWidth / 43) * 50))}" height="7" rx="3.5" fill="${weeklyColor}"/>
-  <text x="18" y="${y + 27}" font-family="Arial, sans-serif" font-size="8" fill="#9aa7b5">Session</text>
-  <text x="126" y="${y + 27}" text-anchor="end" font-family="Arial, sans-serif" font-size="8" fill="#9aa7b5">Weekly</text>`;
+  <rect x="76" y="${y + 8}" width="${weekly ? Math.max(0, Math.round((weeklyWidth / 43) * 50)) : weeklyUsage ? 43 : 0}" height="7" rx="3.5" fill="${weeklyColor}" opacity="${weekly ? 1 : 0.55}"/>
+  <text x="18" y="${y + 27}" font-family="Arial, sans-serif" font-size="8" fill="#9aa7b5">${escapeXml(session ? "Session" : sessionUsage ? "Usage" : "Session")}</text>
+  <text x="126" y="${y + 27}" text-anchor="end" font-family="Arial, sans-serif" font-size="8" fill="#9aa7b5">${escapeXml(weekly ? "Weekly" : weeklyUsage ? "Usage" : "Weekly")}</text>`;
 }
 
 function renderFocusedSvg(summary, providerName) {
@@ -1218,8 +1370,8 @@ function renderFocusedSvg(summary, providerName) {
   <rect x="9" y="9" width="126" height="126" rx="14" fill="#111820" stroke="#2b3948" stroke-width="2"/>
   <text x="18" y="28" font-family="Arial, sans-serif" font-size="14" font-weight="700" fill="#f8fafc">${escapeXml(name)}</text>
   <text x="126" y="28" text-anchor="end" font-family="Arial, sans-serif" font-size="9" fill="#9aa7b5">${escapeXml(updatedLabel(summary))}</text>
-  ${limitLineSvg(session, 47, color, now)}
-  ${limitLineSvg(weekly, 85, color, now)}
+  ${limitOrUsageLineSvg(provider, "session", 47, color, now)}
+  ${limitOrUsageLineSvg(provider, "weekly", 85, color, now)}
   <text x="18" y="125" font-family="Arial, sans-serif" font-size="9" fill="#9aa7b5">30d ${escapeXml(shortNumber(thirtyDayTokens))}</text>
   <text x="76" y="125" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#9aa7b5">${escapeXml(displayCost(provider.cost.thirtyDayCostNanos))}</text>
   <text x="126" y="125" text-anchor="end" font-family="Arial, sans-serif" font-size="9" fill="#9aa7b5">${escapeXml(shortNumber(latest))}</text>
@@ -1269,6 +1421,17 @@ function renderSingleLimitSvg(summary, providerName, limitName) {
   const limit = limitFor(provider, limitName);
   const color = providerName === "codex" ? "#54c7d4" : "#e28a67";
   const providerLabel = providerName === "codex" ? "Codex" : "Claude";
+  const usageWindow = fallbackUsageWindowForLimit(provider, limitName);
+  if (!limit && usageWindow) {
+    return singleMetricBaseSvg({
+      title: titleForUsageWindow(providerName, usageWindow),
+      value: compactUsageWindowValue(usageWindow),
+      subtitle: usageWindow.requests ? `${shortNumber(usageWindow.requests)} requests` : usageWindowSubtitle(usageWindow),
+      color,
+      percent: null,
+      footer: usageWindow.sessions ? `${shortNumber(usageWindow.sessions)} sessions` : usageWindowFooter(usageWindow)
+    });
+  }
   const label = limit ? limit.label : displayLimitLabel(limitName);
   const title = `${providerLabel} ${label}`;
   const value = limit ? `${limit.leftPercent}%` : "-";
@@ -1411,6 +1574,7 @@ module.exports = {
   svgDataUri,
   titleForSummary,
   shortNumber,
+  parseClaudeUsageDetails,
   parseClaudeUsageText,
   tokenSummaryFromUsage,
   windowStartForDays

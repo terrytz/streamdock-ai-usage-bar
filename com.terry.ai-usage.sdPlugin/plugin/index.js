@@ -88,6 +88,11 @@ function writeLimitCache(summary) {
     providers[providerName] = { limits: provider.limits };
     changed = true;
   }
+  const claude = summary.providers.claude;
+  if (claude && !claude.errors && !claude.limits.length && (claude.usageWindows || []).length && providers.claude) {
+    delete providers.claude;
+    changed = true;
+  }
   if (!changed || !Object.keys(providers).length) return;
 
   cachedLimitSummary = {
@@ -110,6 +115,7 @@ function compactProvider(provider) {
     tokens: provider.tokens,
     limits: provider.limits,
     cost: provider.cost,
+    usageWindows: provider.usageWindows || [],
     requests: provider.requests,
     messages: provider.messages,
     turns: provider.turns,
@@ -245,6 +251,7 @@ function limitSortValue(name) {
 
 function reusablePreviousLimit(providerName, limit, generatedAt) {
   if (!limit) return null;
+  if (limit.source === "claude-cli-header-fallback") return null;
   if (!limit.resetsAt || !Number.isFinite(generatedAt)) return limit;
   const resetsAt = Date.parse(limit.resetsAt);
   if (!Number.isFinite(resetsAt) || resetsAt > generatedAt) return limit;
@@ -266,7 +273,15 @@ function mergeLastGoodLimits(summary, previousSummary) {
     const provider = summary.providers && summary.providers[providerName];
     const previousProvider = previousSummary.providers && previousSummary.providers[providerName];
     if (!provider || !previousProvider) continue;
-    if (!previousProvider.limits.length || !provider.errors) continue;
+    if (!previousProvider.limits.length) continue;
+    if (
+      providerName === "claude"
+      && !provider.errors
+      && !provider.limits.length
+      && (provider.usageWindows || []).length
+    ) {
+      continue;
+    }
 
     const merged = new Map(provider.limits.map((limit) => [limit.name, limit]));
     for (const previousLimit of previousProvider.limits) {
